@@ -123,6 +123,73 @@ impl Drop for HalfOpenSlot {
     }
 }
 
+/// Time left before the absolute foreground deadline.
+///
+/// Every nested operation derives its own timeout from this rather than inheriting a copy
+/// of the original budget, so a chain of operations cannot outlive the deadline by
+/// repeating it.
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// Retains a physical-exchange permit until the exchange is terminal.
+///
+/// A datagram that has been sent stays on the wire whether or not the local future that
+/// sent it is still being awaited. Releasing the permit the moment a losing hedge is
+/// dropped would let the number of exchanges actually in flight exceed the configured
+/// ceiling — the ceiling would bound *waiters*, not *exchanges*, which is not what it
+/// claims to bound. So a cancelled-but-sent exchange keeps its slot until the point at
+/// which it could no longer produce a response.
+///
+/// The retention is bounded by the attempt's own send timeout, and only a cancelled
+/// exchange pays for it: an exchange that completes locally releases its slot inline,
+/// which is the overwhelmingly common case and stays free of any spawn.
+struct ExchangeGuard {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// The instant after which this exchange can no longer produce a response.
+    terminal: Instant,
+    completed: bool,
+}
+
+impl ExchangeGuard {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit, terminal: Instant) -> Self {
+        Self {
+            permit: Some(permit),
+            terminal,
+            completed: false,
+        }
+    }
+
+    /// The exchange reached a terminal state locally, so the slot is free immediately.
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ExchangeGuard {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        if self.completed {
+            return;
+        }
+        let wait = self.terminal.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            return;
+        }
+        // Held, not leaked: the sleep is bounded by the send timeout that was already
+        // charged against the foreground deadline. Outside a runtime there is nothing to
+        // wait on and nothing in flight, so the slot is simply returned.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(wait).await;
+                drop(permit);
+            });
+        }
+    }
+}
+
 /// Outcome of a single attempt, used internally.
 struct AttemptResult {
     route: Arc<Route>,
@@ -321,15 +388,27 @@ impl Scheduler {
         }
 
         let cfg = &group.scheduler;
-        let attempt_timeout = cfg.query_timeout.min(budget);
+        // One absolute deadline for the whole resolution. Every nested operation — permit
+        // wait, connect, send, hedge delay, truncation retry — measures itself against
+        // this instant instead of receiving a fresh copy of `budget`.
+        let deadline = start + budget;
         let mut last_detail = String::from("no attempt completed");
 
+        // Which ranked routes have actually been started. Positional accounting was wrong
+        // here: it assumed the top two routes had been attempted whether or not the hedge
+        // was ever admitted, so a disabled or budget-denied hedge silently consumed the
+        // second route's eligibility and the emergency fallback skipped straight past the
+        // one route that could still answer.
+        let mut attempted = vec![false; ranked.len()];
+
         let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
+        attempted[0] = true;
         pending.push(self.attempt(
             Arc::clone(&ranked[0]),
             message.clone(),
             options,
-            attempt_timeout,
+            deadline,
+            cfg.query_timeout,
             Duration::ZERO,
             None,
             PermitPolicy::Queue,
@@ -338,11 +417,14 @@ impl Scheduler {
         if cfg.hedge_enabled && ranked.len() > 1 && hedge_budget.allows(cfg.hedge_max_fraction) {
             let delay = ranked[0].with_health(|h| h.hedge_delay(cfg));
             if delay < budget {
+                // Marked only here, where the attempt future is actually admitted.
+                attempted[1] = true;
                 pending.push(self.attempt(
                     Arc::clone(&ranked[1]),
                     message.clone(),
                     options,
-                    attempt_timeout,
+                    deadline,
+                    cfg.query_timeout,
                     delay,
                     Some(Arc::clone(&hedge_budget)),
                     PermitPolicy::Shed,
@@ -350,7 +432,6 @@ impl Scheduler {
             }
         }
 
-        let mut tried = 2.min(ranked.len());
         let mut fanned_out = false;
         // Whether any attempt actually reached an upstream. A resolution in which every
         // attempt was shed at the ceiling is overload, not upstream failure, and must be
@@ -358,13 +439,13 @@ impl Scheduler {
         let mut any_exchange = false;
 
         loop {
-            let remaining = budget.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
+            let left = remaining(deadline);
+            if left.is_zero() {
                 return Err(ResolveError::Timeout {
                     elapsed_ms: start.elapsed().as_millis() as u64,
                 });
             }
-            let next = match tokio::time::timeout(remaining, pending.next()).await {
+            let next = match tokio::time::timeout(left, pending.next()).await {
                 Err(_) => {
                     return Err(ResolveError::Timeout {
                         elapsed_ms: start.elapsed().as_millis() as u64,
@@ -382,6 +463,14 @@ impl Scheduler {
                     // the resolver generated itself.
                     let Some(outcome) = result.outcome else {
                         if Arc::ptr_eq(&result.route, &ranked[0]) {
+                            // A primary that never started is either overload or an
+                            // expired deadline, and the two are different failures: only
+                            // the first says anything about capacity.
+                            if remaining(deadline).is_zero() {
+                                return Err(ResolveError::Timeout {
+                                    elapsed_ms: start.elapsed().as_millis() as u64,
+                                });
+                            }
                             // The primary could not start inside its own timeout, so the
                             // resolver is overloaded. Report it exactly as the old
                             // resolve-entry shed did: SERVFAIL plus the shed counter.
@@ -420,9 +509,8 @@ impl Scheduler {
                             // Truncated UDP answers must be retried over a stream
                             // transport before they can be treated as complete.
                             if msg.metadata.truncation && !result.route.key.transport.is_stream() {
-                                let remaining = budget.saturating_sub(start.elapsed());
                                 return match self
-                                    .stream_retry(group, &message, options, remaining, seed)
+                                    .stream_retry(group, &message, options, deadline, seed)
                                     .await
                                 {
                                     Some(answer) => Ok(answer),
@@ -450,23 +538,33 @@ impl Scheduler {
                 }
                 None => {
                     // Every started attempt has finished without an acceptable answer.
-                    if cfg.emergency_fanout && !fanned_out && tried < ranked.len() {
+                    // Fall back over the routes that were never started, in rank order —
+                    // membership, not position, decides what is still eligible.
+                    if cfg.emergency_fanout && !fanned_out {
                         fanned_out = true;
-                        let extra = cfg.emergency_fanout_max.min(ranked.len() - tried);
-                        for route in ranked.iter().skip(tried).take(extra) {
+                        let mut extra = 0;
+                        for idx in 0..ranked.len() {
+                            if extra >= cfg.emergency_fanout_max {
+                                break;
+                            }
+                            if attempted[idx] {
+                                continue;
+                            }
+                            attempted[idx] = true;
                             pending.push(self.attempt(
-                                Arc::clone(route),
+                                Arc::clone(&ranked[idx]),
                                 message.clone(),
                                 options,
-                                attempt_timeout,
+                                deadline,
+                                cfg.query_timeout,
                                 Duration::ZERO,
                                 None,
                                 PermitPolicy::Shed,
                             ));
                             metrics::counter!(crate::metrics::names::UPSTREAM_DUPLICATES_TOTAL)
                                 .increment(1);
+                            extra += 1;
                         }
-                        tried += extra;
                         if extra > 0 {
                             continue;
                         }
@@ -494,10 +592,10 @@ impl Scheduler {
         group: &UpstreamGroup,
         message: &Message,
         options: DnsRequestOptions,
-        budget: Duration,
+        deadline: Instant,
         seed: u64,
     ) -> Option<UpstreamAnswer> {
-        if budget.is_zero() {
+        if remaining(deadline).is_zero() {
             return None;
         }
         metrics::counter!(crate::metrics::names::UPSTREAM_TCP_RETRY_TOTAL).increment(1);
@@ -509,14 +607,20 @@ impl Scheduler {
             .into_iter()
             .filter(|r| r.key.transport.is_stream())
             .collect();
-        let timeout = group.scheduler.query_timeout.min(budget);
+        // Each candidate is charged against the same absolute deadline. Handing every
+        // candidate its own copy of the remaining budget is what let two hanging stream
+        // routes take twice the whole foreground budget.
         for route in stream_routes.into_iter().take(2) {
+            if remaining(deadline).is_zero() {
+                break;
+            }
             let result = self
                 .attempt(
                     Arc::clone(&route),
                     message.clone(),
                     options,
-                    timeout,
+                    deadline,
+                    group.scheduler.query_timeout,
                     Duration::ZERO,
                     None,
                     PermitPolicy::Queue,
@@ -553,7 +657,8 @@ impl Scheduler {
         route: Arc<Route>,
         message: Message,
         options: DnsRequestOptions,
-        timeout: Duration,
+        deadline: Instant,
+        attempt_cap: Duration,
         delay: Duration,
         hedge_budget: Option<Arc<HedgeBudget>>,
         policy: PermitPolicy,
@@ -562,6 +667,11 @@ impl Scheduler {
         // exists to give the primary a head start, and holding a global slot through it
         // would subtract that capacity from real exchanges.
         if !delay.is_zero() {
+            // Sleeping past the deadline could only produce an answer nobody is waiting
+            // for, at the cost of a real exchange slot.
+            if delay >= remaining(deadline) {
+                return AttemptResult::shed(route);
+            }
             tokio::time::sleep(delay).await;
         }
 
@@ -574,9 +684,17 @@ impl Scheduler {
         // because it carries no evidence about the route. The permit is held across the
         // send await, so a dropped attempt future — a losing hedge, a budget expiry —
         // releases it: cancellation cannot leak a slot.
-        let _permit = match policy {
+        // Derived from the absolute deadline, never inherited: the permit wait and the
+        // exchange it protects share one budget rather than each receiving a full copy.
+        let wait_budget = attempt_cap.min(remaining(deadline));
+        if wait_budget.is_zero() {
+            return AttemptResult::shed(route);
+        }
+        let permit = match policy {
             PermitPolicy::Queue => {
-                match tokio::time::timeout(timeout, Arc::clone(&self.slots).acquire_owned()).await {
+                match tokio::time::timeout(wait_budget, Arc::clone(&self.slots).acquire_owned())
+                    .await
+                {
                     Ok(Ok(permit)) => permit,
                     _ => return AttemptResult::shed(route),
                 }
@@ -586,6 +704,12 @@ impl Scheduler {
                 Err(_) => return AttemptResult::shed(route),
             },
         };
+
+        // Recomputed after the wait, which may have consumed most of the budget.
+        let send_timeout = attempt_cap.min(remaining(deadline));
+        if send_timeout.is_zero() {
+            return AttemptResult::shed(route);
+        }
 
         if let Some(budget) = hedge_budget {
             budget.record_hedge();
@@ -616,17 +740,24 @@ impl Scheduler {
             }
         }
 
+        // From here the exchange may reach the wire, so its accounting slot is owned by a
+        // guard that survives cancellation of this future rather than by the future's own
+        // stack frame.
+        let mut exchange = ExchangeGuard::new(permit, Instant::now() + send_timeout);
+
         let sent = outgoing.clone();
-        match route
+        let sent_result = route
             .send(
                 self.registry.provider(),
                 self.registry.context(),
                 outgoing,
                 options,
-                timeout,
+                send_timeout,
             )
-            .await
-        {
+            .await;
+        // Terminal locally: response, transport error or timeout. The slot is free now.
+        exchange.complete();
+        match sent_result {
             Err((outcome, detail)) => AttemptResult {
                 route,
                 outcome: Some(outcome),

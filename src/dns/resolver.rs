@@ -1037,7 +1037,10 @@ impl Resolver {
     /// This is a non-blocking hand-off. If the queue is full the observation is simply
     /// dropped: probes are optional evidence and must never slow down resolution.
     fn schedule_probes(&self, key: &CacheKey, entry: &CacheEntry) {
-        if !self.probes.is_enabled() || entry.kind != EntryKind::Positive {
+        // Read from the configuration published by this runtime-state generation rather
+        // than from the queue's own toggle, which a reload updates separately: one query
+        // must observe one coherent policy. `offer` still gates on the queue itself.
+        if !self.config.probe.enabled || entry.kind != EntryKind::Positive {
             return;
         }
         if !matches!(key.qtype, RecordType::A | RecordType::AAAA) {
@@ -1105,9 +1108,12 @@ impl Resolver {
         let quality = self.quality.snapshot_for(&addresses, 443, &qname);
         let snapshot = self.cloudflare.prefixes();
         let now_unix = crate::util::time::SystemClock.unix_secs_now();
-        let verified = if self.cloudflare.enabled()
-            && self.cloudflare.mode() == CloudflareMode::VerifiedAugment
-        {
+        // One coherent policy generation for this answer: `enabled` and the configured
+        // mode come from the `Config` this runtime state published, and only the live
+        // operational override is read from the shared Cloudflare state.
+        let cloudflare_enabled = self.config.cloudflare.enabled;
+        let cloudflare_mode = self.cloudflare.effective_mode(self.config.cloudflare.mode);
+        let verified = if cloudflare_enabled && cloudflare_mode == CloudflareMode::VerifiedAugment {
             let store = Arc::clone(&self.quality);
             let ranking = self.config.ranking.clone();
             let host = qname.clone();
@@ -1137,8 +1143,8 @@ impl Resolver {
         let ctx = AnswerContext {
             qtype,
             dnssec: entry.dnssec,
-            cloudflare_enabled: self.cloudflare.enabled(),
-            cloudflare_mode: self.cloudflare.mode(),
+            cloudflare_enabled,
+            cloudflare_mode,
             snapshot: snapshot.as_ref().as_ref(),
             domain_excluded: crate::policy::cloudflare::is_excluded(
                 &qname,
