@@ -1,0 +1,2 @@
+# systemd-sysusers definition for the unprivileged service account.
+u egressdns - "EgressDNS resolver" /var/lib/egressdns /usr/sbin/nologin

@@ -1,0 +1,73 @@
+#!/usr/sbin/nft -f
+#
+# Example nftables policy for an EgressDNS node.
+#
+# It restricts DNS service to the LAN, leaves the loopback administration and metrics
+# interfaces reachable only from the host itself, and permits the outbound traffic the
+# resolver and its optional Cloudflare optimizer need.
+#
+# EDIT the `lan_v4` and `lan_v6` sets before installing:
+#     sudo nft -f /etc/nftables.d/egressdns.nft
+
+table inet egressdns {
+    set lan_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            10.0.0.0/16,        # EXAMPLE — replace with your LAN
+            192.168.10.0/24,    # EXAMPLE — replace with your LAN
+        }
+    }
+
+    set lan_v6 {
+        type ipv6_addr
+        flags interval
+        elements = {
+            fd00:0:0:10::/64,   # EXAMPLE — replace with your LAN
+        }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Established traffic and loopback first.
+        ct state established,related accept
+        ct state invalid drop
+        iif lo accept
+
+        # ICMP is required for path MTU discovery and basic diagnostics.
+        ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded, parameter-problem } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept
+
+        # DNS service, LAN only. Everything else on port 53 is dropped, which keeps this
+        # node off every open-resolver scan list.
+        ip saddr @lan_v4 udp dport 53 accept
+        ip saddr @lan_v4 tcp dport 53 accept
+        ip6 saddr @lan_v6 udp dport 53 accept
+        ip6 saddr @lan_v6 tcp dport 53 accept
+
+        # SSH from the management network only. Adjust or remove.
+        ip saddr @lan_v4 tcp dport 22 accept
+
+        # Metrics and the administration socket are loopback-only by configuration; there
+        # is deliberately no rule opening 9153 to the network.
+
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        # Outbound requirements:
+        #   udp/tcp 53   plain DNS upstreams
+        #   tcp 853      DNS-over-TLS
+        #   udp 853      DNS-over-QUIC
+        #   tcp 443      DNS-over-HTTPS, dataset fetches, Cloudflare probes
+        #   udp 443      HTTP/3 dataset fetches and probes
+        # Tighten this to a destination set if your policy requires it.
+    }
+}

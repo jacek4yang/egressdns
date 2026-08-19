@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default. A job that needs more asks for it explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Third-party actions are pinned to a commit SHA, never a tag or a branch: a tag is a
+  # moving pointer and `@master` is whatever someone else pushed most recently. The
+  # trailing comment records the human-readable version so Dependabot can still update
+  # them. `scripts/pin-github-actions.sh` performs the resolution, and the `pinning` job
+  # below fails the build if an unpinned reference ever appears.
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked
+
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  supply-chain:
+    name: Advisories, licences and bans
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          tool: cargo-deny,cargo-audit
+      # `cargo audit` is run directly rather than through a wrapper action, so this job
+      # needs no token and nothing third-party executes with repository credentials.
+      - name: cargo deny check
+        run: cargo deny check
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: bash -n
+        run: bash -n install.sh upgrade.sh uninstall.sh scripts/*.sh
+      # ShellCheck is preinstalled on the GitHub-hosted Ubuntu image, so it is invoked
+      # directly. The wrapper action this replaced was referenced as `@master`, which
+      # would have executed whatever its maintainer pushed most recently.
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck --severity=warning --shell=bash \
+            install.sh upgrade.sh uninstall.sh scripts/*.sh
+
+  python:
+    name: Python tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Byte-compile the load-test harness
+        run: python3 -m compileall -q scripts/*.py
+      # Every table is deny_unknown_fields, so documentation that names a key the parser
+      # does not accept actively breaks the deployment it was meant to enable.
+      - name: Configuration documentation is in sync with the parser
+        run: ./scripts/check-config-docs.py
+      # unwrap/expect/todo!/unimplemented! abort the process on unexpected input. In a
+      # resolver that means an attacker-shaped packet can take the service down.
+      - name: No fallible-panic constructs on production paths
+        run: ./scripts/check-production-paths.py
+      - name: Lint
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check ruff
+          python3 -m ruff check scripts/
+
+  pinning:
+    name: Actions are SHA-pinned
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Every `uses:` must be a commit SHA
+        run: ./scripts/pin-github-actions.sh --check
+
+  workflows:
+    name: Workflow and configuration syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate workflow YAML
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib
+          try:
+              import yaml
+          except ImportError:
+              sys.exit("PyYAML is required")
+          failed = False
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+              try:
+                  yaml.safe_load(path.read_text())
+                  print(f"ok   {path}")
+              except Exception as exc:
+                  failed = True
+                  print(f"FAIL {path}: {exc}")
+          sys.exit(1 if failed else 0)
+          PY
+      - name: Validate the shipped configurations
+        run: |
+          cargo build --release --locked --bin egressdnsd
+          for f in config/*.toml; do
+            ./target/release/egressdnsd --config "$f" --check-config
+          done
+
+  cross:
+    name: Cross build (aarch64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Install the cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc

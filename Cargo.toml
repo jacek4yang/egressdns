@@ -1,0 +1,106 @@
+[package]
+name = "egressdns"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Adaptive, highly available DNS caching forwarder for enterprise LANs with a single Internet egress"
+authors = ["The EgressDNS contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OWNER/egressdns"
+homepage = "https://github.com/OWNER/egressdns"
+readme = "README.md"
+keywords = ["dns", "resolver", "cache", "dnssec", "cloudflare"]
+categories = ["network-programming"]
+publish = false
+
+[lib]
+name = "egressdns"
+path = "src/lib.rs"
+
+[[bin]]
+name = "egressdnsd"
+path = "src/bin/egressdnsd.rs"
+
+[[bin]]
+name = "egressdnsctl"
+path = "src/bin/egressdnsctl.rs"
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+governor = { version = "0.10", default-features = false, features = ["std", "quanta", "jitter"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+hex = "0.4"
+hickory-net = { version = "0.26", default-features = false, features = ["tokio", "tls-ring", "https-ring", "quic-ring", "h3-ring", "dnssec-ring"] }
+hickory-proto = { version = "0.26", default-features = false, features = ["std", "dnssec-ring"] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "tls-ring", "https-ring", "quic-ring", "h3-ring", "dnssec-ring"] }
+http = "1"
+http-body-util = "0.1"
+humantime-serde = "1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+maxminddb = "0.30"
+ipnet = { version = "2", features = ["serde"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+moka = { version = "0.12", features = ["sync"] }
+nix = { version = "0.31", default-features = false, features = ["net"] }
+parking_lot = "0.12"
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"] }
+rand = "0.10"
+ring = "0.17"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+sd-notify = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt", "time"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "json", "fmt", "std", "ansi", "tracing-log"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+async-trait = "0.1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
+hickory-server = { version = "0.26", default-features = false, features = ["tls-ring", "https-ring", "quic-ring", "h3-ring", "dnssec-ring", "testing"] }
+proptest = "1"
+rcgen = "0.14"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[features]
+default = []
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "debuginfo"
+debug = false
+incremental = false
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = "none"
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[[bench]]
+name = "cloudflare_and_ranking"
+harness = false

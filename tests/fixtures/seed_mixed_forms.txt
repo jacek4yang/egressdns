@@ -1,0 +1,29 @@
+# Synthetic fixture covering every candidate form the parser must accept.
+# Plain address
+104.16.0.1
+# Address with port
+104.16.0.2:443
+# Address with comment
+104.16.0.3#CF 电信优选
+# Address with port and comment
+104.16.0.4:2053#CF 联通优选
+# Bracketed IPv6 with port
+[2606:4700::1111]:443#CF v6
+# Bare IPv6
+2606:4700::2222
+# Hostname form
+cf.example.test
+# Hostname with port and comment
+edge.example.test:443#hostname with port
+# Leading and trailing whitespace
+   104.16.0.5   
+# Not Cloudflare: must be rejected downstream, but must still parse
+8.8.8.8#google
+# Private address: must be rejected
+192.168.1.1
+# Metadata address: must be rejected
+169.254.169.254
+# Malformed entries below must be skipped without aborting the whole response
+999.999.999.999
+104.16.0.6:notaport
+:::::

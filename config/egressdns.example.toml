@@ -1,0 +1,463 @@
+# EgressDNS — fully annotated example configuration.
+#
+# Every setting below is shown with its default value unless noted. Unknown fields are a
+# hard error: a typo will refuse to start rather than being silently ignored.
+#
+# Validate a file without starting the daemon:
+#     egressdnsd --config /etc/egressdns/config.toml --check-config
+#
+# Print the effective configuration with secrets redacted:
+#     egressdnsctl dump-effective-config
+
+# ---------------------------------------------------------------------------
+# Inbound DNS service
+# ---------------------------------------------------------------------------
+[server]
+# Addresses to listen on. Binding port 53 as a non-root user requires
+# CAP_NET_BIND_SERVICE; the shipped systemd unit grants exactly that and nothing else.
+udp_listen = ["127.0.0.1:53", "[::1]:53"]
+tcp_listen = ["127.0.0.1:53", "[::1]:53"]
+
+# Default-deny access control. An empty list refuses every client. A non-loopback listener
+# with an empty allow list is refused at startup, so this daemon can never accidentally
+# become an open resolver.
+allow_from = ["127.0.0.0/8", "::1/128"]
+deny_from = []
+
+# Maximum wall-clock time the foreground path may spend before answering. Background work
+# (probing, dataset updates, prefetching) is never included in this budget.
+foreground_budget = "2s500ms"
+
+# RFC 8482 handling of QTYPE=ANY: "minimal" (synthesised HINFO), "forward" or "refuse".
+any_policy = "minimal"
+
+# Handling of IANA special-use domain names (RFC 6761, 6762, 7686, 8375).
+#   "local"   - answer them here: "localhost" gets the loopback address, and "*.local",
+#               "*.invalid", "*.onion", "*.home.arpa" and the reverse zones for private
+#               and link-local address space get NXDOMAIN. Internal names never leave the
+#               LAN. This is the default.
+#   "forward" - send them upstream like any other name. Correct only when the configured
+#               upstream is itself the internal resolver for those names.
+# Locally configured zones, hosts and suffix rules are always consulted first, so pointing
+# home.arpa. at an internal resolver with a [[local.suffix_rules]] entry still works with
+# the default setting.
+special_use = "local"
+
+[server.udp]
+# Maximum EDNS(0) UDP payload this server emits. 1232 is the DNS Flag Day 2020 value,
+# derived from the IPv6 minimum MTU of 1280. RFC 9715 discusses 1400 for networks known to
+# have a 1500-byte path MTU; raise this only if you have measured that path.
+max_payload = 1232
+# RFC 1035 fixes the non-EDNS limit at 512 bytes; this field exists for documentation and
+# cannot be changed.
+non_edns_max_payload = 512
+recv_buffer_bytes = 4194304
+send_buffer_bytes = 4194304
+# SO_REUSEPORT with one receive worker per socket. Measure before enabling: on some
+# kernels it helps throughput, on others it worsens tail latency.
+reuse_port = false
+workers_per_socket = 1
+
+[server.tcp]
+idle_timeout = "10s"
+max_connection_lifetime = "300s"
+max_connections = 4096
+max_connections_per_client = 64
+max_pipelined_queries = 256
+max_message_bytes = 65535
+# Advertise RFC 7828 edns-tcp-keepalive so clients hold connections open sensibly.
+advertise_edns_keepalive = true
+
+[server.rate_limit]
+enabled = true
+per_client_qps = 2000
+per_client_burst = 4000
+global_qps = 200000
+global_burst = 400000
+client_table_size = 65536
+
+# ---------------------------------------------------------------------------
+# Cache
+# ---------------------------------------------------------------------------
+[cache]
+# The answer and negative caches are bounded by bytes, not by entry count: a DNS answer
+# can be two hundred bytes or two kilobytes, so an entry limit does not bound memory.
+# Measured steady-state RSS is roughly 15 MB + 1.6x this budget.
+max_memory_bytes = 268435456
+failure_max_entries = 20000
+# The variant cache is byte-bounded for the same reason.
+variant_max_memory_bytes = 33554432
+quality_max_entries = 100000
+# Upper bound applied to any authoritative TTL before storage.
+internal_max_ttl = 86400
+# Upper bound applied to negative TTLs derived from the SOA (RFC 2308).
+negative_max_ttl = 3600
+# RFC 9520 requires resolution failures to be cached for at least 1 second and no more
+# than 5 minutes.
+failure_min_ttl = "1s"
+failure_max_ttl = "300s"
+
+# ---------------------------------------------------------------------------
+# Client-facing TTL policy
+# ---------------------------------------------------------------------------
+# Caps only ever reduce a TTL. The remaining authoritative TTL is always an upper bound, so
+# nothing here can extend the lifetime of upstream data. Because LAN DNS latency is very
+# low, short caps buy fresher answers at negligible cost.
+[ttl]
+cap_default = 300
+cap_optimized_multi = 90
+cap_cloudflare_preserve = 60
+cap_cloudflare_augment = 25
+cap_network_change = 15
+cap_serve_stale = 30
+network_change_window = "300s"
+
+# ---------------------------------------------------------------------------
+# Address quality model
+# ---------------------------------------------------------------------------
+[ranking]
+enabled = true
+# Cost assigned to an address with no evidence. Absence of measurement is never treated as
+# evidence of failure.
+neutral_cost_ms = 120.0
+failure_penalty_ms = 400.0
+tail_weight = 0.35
+jitter_weight = 0.25
+uncertainty_penalty_ms = 60.0
+stale_sample_penalty_ms = 40.0
+sample_max_age = "30m"
+evidence_half_life = "1h"
+# Required relative improvement before the address the upstream put first is displaced.
+hysteresis = 0.12
+min_successes_to_lead = 3
+exploration_rate = 0.02
+consecutive_failure_base = 1.8
+
+# ---------------------------------------------------------------------------
+# Serve-stale (RFC 8767)
+# ---------------------------------------------------------------------------
+[serve_stale]
+enabled = true
+max_stale = "24h"
+# RFC 8767 section 5 recommends a client response timer below 1.8 seconds.
+client_timeout = "1s800ms"
+retry_interval = "30s"
+include_ede = true
+
+# ---------------------------------------------------------------------------
+# Prefetching
+# ---------------------------------------------------------------------------
+[prefetch]
+enabled = true
+trigger_fraction = 0.15
+min_hits = 3
+hot_set_size = 20000
+global_qps = 50
+per_key_min_interval = "5s"
+warm_on_start = 200
+queue_size = 4096
+# Sequence prediction is off until benchmark evidence justifies it on your workload.
+transition_prediction = false
+transition_table_size = 20000
+
+# ---------------------------------------------------------------------------
+# Upstream resolvers
+# ---------------------------------------------------------------------------
+[upstream]
+default_group = "default"
+
+[upstream.tls]
+use_system_roots = true
+extra_ca_files = []
+session_resumption = true
+# QUIC 0-RTT is refused by this build: early data is replayable and DNS queries are not
+# safe to replay. Setting this to true is a configuration error.
+quic_zero_rtt = false
+
+[[upstream.groups]]
+name = "default"
+
+# Encrypted transports require literal bootstrap addresses so the resolver never has to
+# resolve its own upstream.
+[[upstream.groups.servers]]
+name = "cloudflare-dot"
+transport = "dot"                  # udp | tcp | dot | doh2 | doh3 | doq
+addresses = ["1.1.1.1", "1.0.0.1"]
+server_name = "cloudflare-dns.com"
+weight = 100
+enabled = true
+# trust_ad = false                 # requires dnssec.mode = "off" and an authenticated transport
+
+[[upstream.groups.servers]]
+name = "quad9-doh2"
+transport = "doh2"
+addresses = ["9.9.9.9", "149.112.112.112"]
+server_name = "dns.quad9.net"
+path = "/dns-query"
+
+[upstream.groups.scheduler]
+hedge_enabled = true
+hedge_percentile = 0.95
+hedge_min_delay = "20ms"
+hedge_max_delay = "400ms"
+# Ceiling on the fraction of queries that may be duplicated by hedging. This is a privacy
+# and load control as much as a performance one.
+hedge_max_fraction = 0.15
+query_timeout = "1s500ms"
+# RFC 9520's ceiling of three queries per server address per transport is satisfied
+# structurally: one resolution makes at most one attempt per route, so there was never a
+# knob to turn. See docs/RFC_COMPLIANCE.md.
+explore_rate = 0.02
+circuit_failure_threshold = 5
+circuit_open_duration = "20s"
+circuit_half_open_successes = 2
+emergency_fanout = true
+emergency_fanout_max = 3
+
+# ---------------------------------------------------------------------------
+# DNSSEC
+# ---------------------------------------------------------------------------
+[dnssec]
+# "validate" performs local validation against the IANA root anchors. "off" disables it.
+mode = "validate"
+# Optional replacement for the compiled-in IANA root anchors, in DNS presentation format
+# (the same shape as the `root.key` shipped by `unbound-anchor`). This setting fails
+# closed: if the file is missing, unreadable, or contains no usable DS or DNSKEY record,
+# startup and reload are both refused rather than silently falling back to the built-in
+# anchors. Leave it commented out to use the compiled-in IANA anchors.
+# trust_anchor_file = "/etc/egressdns/root.key"
+# Trusting an upstream AD bit requires mode = "off" and an authenticated transport.
+trust_upstream_ad = false
+# Global ceiling on validations running at once, enforced with a semaphore in the
+# resolver. Restart-required: the semaphore is created at startup and shared by every
+# resolver generation, so a reload cannot resize it. See docs/CONFIGURATION.md.
+max_concurrent_validations = 256
+validation_cache_entries = 10000
+# Maximum delegation depth followed while building a validation chain, which bounds the
+# work one hostile zone can force.
+max_validation_depth = 12
+extended_errors = true
+
+# ---------------------------------------------------------------------------
+# EDNS Client Subnet (RFC 7871)
+# ---------------------------------------------------------------------------
+# Disabled by default. A client's private LAN address is never forwarded under any mode.
+[ecs]
+# An inbound ECS option from a client is always stripped, under every mode: forwarding
+# one would leak a client's network to the upstream, so it is not a setting.
+mode = "disabled"                  # disabled | fixed-egress
+
+# [ecs.egress]
+# ipv4 = "198.51.100.0/24"         # must be a public prefix, /24 or shorter
+# ipv6 = "2001:db8::/48"           # must be a public prefix, /56 or shorter
+
+# ---------------------------------------------------------------------------
+# Active probing
+# ---------------------------------------------------------------------------
+[probe]
+enabled = true
+queue_size = 8192
+tcp_concurrency = 32
+tls_concurrency = 16
+http_concurrency = 8
+global_connections_per_second = 64
+tcp_timeout = "1s500ms"
+tls_timeout = "3s"
+http_timeout = "5s"
+per_ip_cooldown = "300s"
+per_prefix_cooldown = "30s"
+per_domain_cooldown = "600s"
+max_candidates_per_rrset = 4
+# Only ports declared by an HTTPS/SVCB or SRV record, or listed here, are ever contacted.
+# This is not a port scanner.
+extra_ports = [443]
+max_response_bytes = 16384
+# Redirects are never followed: a probe measures one address, and following a redirect
+# would measure a different host chosen by the peer.
+# HTTP/3 probing is attempted when the peer advertises h3; a UDP-blocked path is recorded
+# as unsupported rather than as a failure.
+enable_http3 = true
+daily_bandwidth_budget_bytes = 67108864
+# Probing special-use space is refused unless listed here. Link-local and cloud metadata
+# ranges can never be probed, even with an entry.
+allow_special_use_targets = []
+
+# A validation profile raises the bar for an important domain.
+# [[probe.profiles]]
+# name = "intranet-portal"
+# domains = [".portal.example.com"]
+# port = 443
+# path = "/healthz"
+# method = "GET"
+# allowed_status = [200]
+# alpn = ["h2", "http/1.1"]
+# body_sha256 = "..."             # 64 hex characters
+# spki_sha256 = ["..."]           # certificate public-key pins
+# required_issuer_cn = "Example Corp Issuing CA"
+#
+# [probe.profiles.required_header]
+# name = "x-service"
+# value = "portal"
+
+# ---------------------------------------------------------------------------
+# Network environment detection
+# ---------------------------------------------------------------------------
+[network]
+enabled = true
+poll_interval = "5s"
+debounce = "3s"
+# Reference destinations used only for a kernel route lookup. No packets are sent.
+reference_v4 = "1.1.1.1"
+reference_v6 = "2606:4700::1111"
+confidence_decay_on_change = 0.25
+relearn_window = "600s"
+
+# ---------------------------------------------------------------------------
+# Cloudflare optimization
+# ---------------------------------------------------------------------------
+[cloudflare]
+enabled = false
+# off | preserve | verified-augment
+mode = "preserve"
+probe_hosts = ["speed.cloudflare.com"]
+allow_domains = []
+deny_domains = []
+candidate_pool_max = 4096
+static_candidates = []
+
+[cloudflare.official]
+api_url = "https://api.cloudflare.com/client/v4/ips"
+ipv4_url = "https://www.cloudflare.com/ips-v4"
+ipv6_url = "https://www.cloudflare.com/ips-v6"
+refresh_interval = "24h"
+timeout = "10s"
+max_response_bytes = 262144
+min_ipv4_prefixes = 8
+min_ipv6_prefixes = 4
+cache_file = "/var/lib/egressdns/cloudflare-prefixes.json"
+
+# Third-party seed endpoints propose candidate addresses. They are untrusted: every address
+# must independently pass official-prefix membership, special-use filtering and local
+# protocol validation before it can influence any answer.
+[cloudflare.seeds]
+enabled = false
+refresh_interval = "40m"
+timeout = "10s"
+max_response_bytes = 131072
+max_addresses_per_response = 256
+resolve_hostnames = true
+
+[[cloudflare.seeds.endpoints]]
+name = "ct"
+url = "https://cf.090227.xyz/ct?ips=6"
+enabled = true
+
+[[cloudflare.seeds.endpoints]]
+name = "cu"
+url = "https://cf.090227.xyz/cu"
+enabled = true
+
+[[cloudflare.seeds.endpoints]]
+name = "cmcc"
+url = "https://cf.090227.xyz/cmcc?ips=8"
+enabled = true
+
+[cloudflare.sampling]
+# Sampling is IPv4-only by construction. There is deliberately no IPv6 switch: random
+# traversal of a /32 has no defensible expected yield, so such a flag could only ever be
+# a setting that did nothing. IPv6 candidates come from observed answers and seed lists.
+enabled = true
+round_interval = "300s"
+addresses_per_round = 32
+max_new_candidates_per_hour = 512
+buckets_per_prefix = 64
+exploit_fraction = 0.3
+seed = 6841635893428224001
+
+[cloudflare.augment]
+max_added = 2
+min_validations = 3
+validation_ttl = "1h"
+min_advantage = 0.12
+min_samples = 8
+
+# ---------------------------------------------------------------------------
+# Offline datasets
+# ---------------------------------------------------------------------------
+[datasets]
+hosts_files = []
+domain_category_files = []
+# GeoIP and ASN databases are advisory metadata only. They can never make a valid address
+# invalid.
+# geoip_mmdb = "/var/lib/egressdns/GeoLite2-Country.mmdb"
+# asn_mmdb = "/var/lib/egressdns/GeoLite2-ASN.mmdb"
+reload_interval = "1h"
+max_file_bytes = 67108864
+max_records = 2000000
+
+# ---------------------------------------------------------------------------
+# Static local data
+# ---------------------------------------------------------------------------
+[local]
+local_ttl = 60
+suffix_rules = []
+
+# [[local.hosts]]
+# name = "printer.corp.example"
+# addresses = ["10.0.0.9"]
+
+# [[local.zones]]
+# name = "corp.example"
+# authoritative = true
+#
+# [[local.zones.records]]
+# name = "gw"
+# rtype = "A"
+# value = "10.0.0.1"
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+# SQLite holds only derived state: quality history, candidate history, upstream statistics
+# and aggregate hot-domain counts. Live DNS answers are never persisted.
+[storage]
+enabled = true
+path = "/var/lib/egressdns/state.sqlite3"
+flush_interval = "30s"
+queue_size = 8192
+max_quality_rows = 50000
+max_hot_rows = 20000
+max_candidate_rows = 20000
+row_max_age = "30d"
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+[metrics]
+enabled = true
+listen = "127.0.0.1:9153"
+allow_non_loopback = false
+
+[logging]
+level = "info"
+json = false
+# Query logging records client addresses and query names, which is personal data in most
+# jurisdictions. Off by default.
+query_log = false
+query_log_sample = 0.01
+
+[admin]
+enabled = true
+socket = "/run/egressdns/admin.sock"
+socket_mode = 0o660
+max_request_bytes = 65536
+
+# ---------------------------------------------------------------------------
+# Resource ceilings
+# ---------------------------------------------------------------------------
+[resources]
+# worker_threads = 4               # defaults to the number of available cores
+max_inflight_queries = 20000
+max_inflight_upstream = 4000
+max_blocking_threads = 4
+systemd_watchdog = true

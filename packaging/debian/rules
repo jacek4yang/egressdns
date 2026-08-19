@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+#
+# The build is a plain `cargo build --release --locked`. Debian's cargo wrapper is not
+# used because this package vendors its lockfile deliberately: reproducing the exact
+# dependency set is part of the release contract.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked --bins
+
+override_dh_auto_test:
+	cargo test --release --locked --workspace
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/egressdnsd   debian/egressdns/usr/bin/egressdnsd
+	install -D -m 0755 target/release/egressdnsctl debian/egressdns/usr/bin/egressdnsctl
+	install -D -m 0640 config/egressdns.production.toml \
+	    debian/egressdns/etc/egressdns/config.toml
+	install -D -m 0644 packaging/systemd/egressdns.service \
+	    debian/egressdns/lib/systemd/system/egressdns.service
+	install -D -m 0644 packaging/systemd/egressdns.sysusers \
+	    debian/egressdns/usr/lib/sysusers.d/egressdns.conf
+	install -D -m 0644 packaging/systemd/egressdns.tmpfiles \
+	    debian/egressdns/usr/lib/tmpfiles.d/egressdns.conf
+
+override_dh_auto_clean:
+	cargo clean || true
+	rm -rf debian/cargo
+
+override_dh_installsystemd:
+	# Do not start on install. Port 53 is almost certainly already in use, and taking it
+	# over is a decision the administrator makes, not the package.
+	dh_installsystemd --no-start --no-enable

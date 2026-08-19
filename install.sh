@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+#
+# EgressDNS installer.
+#
+# Remote install (latest release):
+#   curl -fsSL "https://raw.githubusercontent.com/<OWNER>/egressdns/main/install.sh" \
+#     | sudo bash -s -- --repo "<OWNER>/egressdns"
+#
+# Remote install (pinned version):
+#   curl -fsSL "https://raw.githubusercontent.com/<OWNER>/egressdns/main/install.sh" \
+#     | sudo bash -s -- --repo "<OWNER>/egressdns" --version "v1.0.0"
+#
+# Local install from an extracted source archive:
+#   sudo ./install.sh --local-build
+#
+# The installer never removes another DNS service. If something already owns port 53 it
+# reports what and stops, leaving your system exactly as it was.
+
+set -Eeuo pipefail
+
+readonly PROGRAM="egressdns"
+readonly DAEMON="egressdnsd"
+readonly CONTROL="egressdnsctl"
+readonly BIN_DIR="/usr/local/bin"
+readonly CONF_DIR="/etc/egressdns"
+readonly STATE_DIR="/var/lib/egressdns"
+readonly RUN_DIR="/run/egressdns"
+readonly UNIT_PATH="/etc/systemd/system/egressdns.service"
+readonly SERVICE_USER="egressdns"
+
+REPO=""
+VERSION="latest"
+CONFIG_SOURCE=""
+LOCAL_BUILD=0
+NO_START=0
+FORCE=0
+BACKUP_DIR=""
+ROOT_PREFIX="${EGRESSDNS_TEST_ROOT:-}"
+WORK_DIR=""
+ROLLBACK_NEEDED=0
+
+log()  { printf '[%s] %s\n' "$PROGRAM" "$*" >&2; }
+warn() { printf '[%s] warning: %s\n' "$PROGRAM" "$*" >&2; }
+die()  { printf '[%s] error: %s\n' "$PROGRAM" "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: install.sh [options]
+
+  --repo <owner/name>   GitHub repository to download release assets from.
+  --version <tag>       Release tag to install (default: latest).
+  --config <path>       Configuration file to install when none exists yet.
+  --local-build         Build from the current source tree instead of downloading.
+  --no-start            Install without enabling or starting the service.
+  --force               Continue even when a pre-flight check would normally stop.
+  --help                Show this help.
+
+Environment:
+  EGRESSDNS_TEST_ROOT   Install into this prefix instead of /. Used by the test suite;
+                        systemd integration and health checks are skipped.
+USAGE
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo)         REPO="${2:-}";          shift 2 ;;
+            --version)      VERSION="${2:-}";       shift 2 ;;
+            --config)       CONFIG_SOURCE="${2:-}"; shift 2 ;;
+            --local-build)  LOCAL_BUILD=1;          shift ;;
+            --no-start)     NO_START=1;             shift ;;
+            --force)        FORCE=1;                shift ;;
+            --help|-h)      usage; exit 0 ;;
+            *)              die "unknown option '$1' (try --help)" ;;
+        esac
+    done
+    if [ "$LOCAL_BUILD" -eq 0 ] && [ -z "$REPO" ]; then
+        die "either --repo <owner/name> or --local-build is required"
+    fi
+    if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+        die "repository '$REPO' is not in <owner>/<name> form"
+    fi
+    if [ -n "$VERSION" ] && [ "$VERSION" != "latest" ] &&
+       ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; then
+        die "version '$VERSION' is not a valid release tag"
+    fi
+}
+
+path() { printf '%s%s' "$ROOT_PREFIX" "$1"; }
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        die "must run as root (use sudo)"
+    fi
+}
+
+detect_platform() {
+    local os_id="unknown"
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        os_id="$(. /etc/os-release && printf '%s' "${ID:-unknown}")"
+        local like
+        # shellcheck source=/dev/null
+        like="$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")"
+        case "$os_id $like" in
+            *debian*|*ubuntu*) : ;;
+            *)
+                if [ "$FORCE" -eq 1 ]; then
+                    warn "unsupported distribution '$os_id'; continuing because --force was given"
+                else
+                    die "this installer targets Debian and derivatives; found '$os_id' (use --force to override)"
+                fi
+                ;;
+        esac
+    else
+        warn "cannot read /etc/os-release; assuming a Debian-like system"
+    fi
+
+    local machine
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64|amd64)  ARCH="x86_64" ;;
+        aarch64|arm64) ARCH="aarch64" ;;
+        *)             die "unsupported CPU architecture '$machine'; supported: x86_64, aarch64" ;;
+    esac
+    log "platform: ${os_id}/${ARCH}"
+}
+
+need_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "required tool '$1' is not installed"
+}
+
+check_port_53() {
+    [ -n "$ROOT_PREFIX" ] && return 0
+    local holder=""
+    if command -v ss >/dev/null 2>&1; then
+        holder="$(ss -lntup 2>/dev/null | awk '$5 ~ /:53$/ {print}' || true)"
+    fi
+    if [ -z "$holder" ]; then
+        return 0
+    fi
+    if systemctl is-active --quiet egressdns.service 2>/dev/null; then
+        log "port 53 is held by this service; treating as an upgrade"
+        return 0
+    fi
+    printf '%s\n' "$holder" >&2
+    if [ "$FORCE" -eq 1 ]; then
+        warn "port 53 is already in use; continuing because --force was given"
+        return 0
+    fi
+    cat >&2 <<'MSG'
+
+Port 53 is already in use by the process shown above.
+
+EgressDNS will not remove or disable another DNS service for you. Stop or reconfigure it
+first, for example:
+
+    sudo systemctl disable --now systemd-resolved
+    sudo systemctl disable --now unbound
+
+then re-run this installer.
+MSG
+    exit 3
+}
+
+create_user() {
+    [ -n "$ROOT_PREFIX" ] && return 0
+    if id -u "$SERVICE_USER" >/dev/null 2>&1; then
+        log "service account '$SERVICE_USER' already exists"
+        return 0
+    fi
+    log "creating service account '$SERVICE_USER'"
+    useradd --system --no-create-home --home-dir "$STATE_DIR" \
+            --shell /usr/sbin/nologin "$SERVICE_USER"
+}
+
+make_dirs() {
+    install -d -m 0755 "$(path "$BIN_DIR")"
+    install -d -m 0750 "$(path "$CONF_DIR")"
+    install -d -m 0750 "$(path "$STATE_DIR")"
+    install -d -m 0750 "$(path "$RUN_DIR")"
+    if [ -z "$ROOT_PREFIX" ]; then
+        chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$RUN_DIR"
+        chown "root:$SERVICE_USER" "$CONF_DIR"
+    fi
+}
+
+backup_existing() {
+    BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/egressdns-backup.XXXXXX")"
+    for binary in "$DAEMON" "$CONTROL"; do
+        if [ -f "$(path "$BIN_DIR")/$binary" ]; then
+            cp -p "$(path "$BIN_DIR")/$binary" "$BACKUP_DIR/$binary"
+        fi
+    done
+    if [ -f "$(path "$CONF_DIR")/config.toml" ]; then
+        cp -p "$(path "$CONF_DIR")/config.toml" "$BACKUP_DIR/config.toml"
+    fi
+    if [ -f "$(path "$UNIT_PATH")" ]; then
+        cp -p "$(path "$UNIT_PATH")" "$BACKUP_DIR/egressdns.service"
+    fi
+    log "previous installation backed up to $BACKUP_DIR"
+}
+
+rollback() {
+    [ "$ROLLBACK_NEEDED" -eq 1 ] || return 0
+    [ -n "$BACKUP_DIR" ] || return 0
+    warn "rolling back to the previous installation"
+    for binary in "$DAEMON" "$CONTROL"; do
+        if [ -f "$BACKUP_DIR/$binary" ]; then
+            install -m 0755 "$BACKUP_DIR/$binary" "$(path "$BIN_DIR")/$binary"
+        else
+            rm -f "$(path "$BIN_DIR")/$binary"
+        fi
+    done
+    if [ -f "$BACKUP_DIR/config.toml" ]; then
+        install -m 0640 "$BACKUP_DIR/config.toml" "$(path "$CONF_DIR")/config.toml"
+    fi
+    if [ -f "$BACKUP_DIR/egressdns.service" ]; then
+        install -m 0644 "$BACKUP_DIR/egressdns.service" "$(path "$UNIT_PATH")"
+    fi
+    if [ -z "$ROOT_PREFIX" ]; then
+        systemctl daemon-reload || true
+        systemctl restart egressdns.service 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        rollback
+    fi
+    [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
+    exit "$status"
+}
+
+resolve_version() {
+    # shellcheck disable=SC2031  # VERSION is only ever assigned in this function, which
+    # runs in the main shell; the subshell shellcheck sees is the command substitution
+    # below, whose output is assigned back here.
+    if [ "$VERSION" != "latest" ]; then
+        return 0
+    fi
+    log "resolving the latest release of $REPO"
+    local api="https://api.github.com/repos/${REPO}/releases/latest"
+    local body
+    body="$(curl -fsSL --retry 3 --retry-delay 2 -H 'Accept: application/vnd.github+json' "$api")" ||
+        die "cannot query the GitHub release API for $REPO"
+    VERSION="$(printf '%s' "$body" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 |
+               sed 's/.*"\([^"]*\)"$/\1/')"
+    [ -n "$VERSION" ] || die "could not determine the latest release tag"
+    log "latest release is $VERSION"
+}
+
+download_release() {
+    need_tool curl
+    need_tool sha256sum
+    need_tool tar
+    resolve_version
+
+    local base="https://github.com/${REPO}/releases/download/${VERSION}"
+    local asset="egressdns-${VERSION}-linux-${ARCH}.tar.gz"
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/egressdns-install.XXXXXX")"
+
+    log "downloading $asset"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$WORK_DIR/$asset" "$base/$asset" ||
+        die "cannot download $base/$asset"
+    log "downloading SHA256SUMS"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$WORK_DIR/SHA256SUMS" "$base/SHA256SUMS" ||
+        die "cannot download $base/SHA256SUMS"
+
+    log "verifying SHA-256"
+    local expected actual
+    expected="$(awk -v want="$asset" '$2 == want || $2 == "*" want {print $1}' "$WORK_DIR/SHA256SUMS" | head -1)"
+    [ -n "$expected" ] || die "SHA256SUMS does not list $asset"
+    actual="$(sha256sum "$WORK_DIR/$asset" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        die "checksum mismatch for $asset (expected $expected, got $actual)"
+    fi
+    log "checksum verified"
+
+    tar -xzf "$WORK_DIR/$asset" -C "$WORK_DIR"
+    STAGE_DIR="$WORK_DIR"
+    if [ -d "$WORK_DIR/egressdns" ]; then
+        STAGE_DIR="$WORK_DIR/egressdns"
+    fi
+    [ -f "$STAGE_DIR/$DAEMON" ] || die "release archive does not contain $DAEMON"
+}
+
+build_locally() {
+    need_tool cargo
+    need_tool tar
+    log "building from source with cargo build --release --locked"
+    cargo build --release --locked
+    STAGE_DIR="target/release"
+    [ -f "$STAGE_DIR/$DAEMON" ] || die "build did not produce $DAEMON"
+}
+
+install_files() {
+    install -m 0755 "$STAGE_DIR/$DAEMON"  "$(path "$BIN_DIR")/$DAEMON"
+    install -m 0755 "$STAGE_DIR/$CONTROL" "$(path "$BIN_DIR")/$CONTROL"
+    log "installed $DAEMON and $CONTROL into $BIN_DIR"
+
+    local unit_src=""
+    for candidate in "$STAGE_DIR/egressdns.service" "packaging/systemd/egressdns.service"; do
+        if [ -f "$candidate" ]; then unit_src="$candidate"; break; fi
+    done
+    if [ -n "$unit_src" ]; then
+        install -m 0644 "$unit_src" "$(path "$UNIT_PATH")"
+        log "installed the systemd unit"
+    else
+        warn "no systemd unit found in the archive or source tree"
+    fi
+
+    if [ ! -f "$(path "$CONF_DIR")/config.toml" ]; then
+        local conf_src="$CONFIG_SOURCE"
+        if [ -z "$conf_src" ]; then
+            for candidate in \
+                "$STAGE_DIR/egressdns.production.toml" \
+                "config/egressdns.production.toml" \
+                "$STAGE_DIR/config.toml"; do
+                if [ -f "$candidate" ]; then conf_src="$candidate"; break; fi
+            done
+        fi
+        [ -n "$conf_src" ] || die "no configuration file to install; pass --config <path>"
+        install -m 0640 "$conf_src" "$(path "$CONF_DIR")/config.toml"
+        if [ -z "$ROOT_PREFIX" ]; then
+            chown "root:$SERVICE_USER" "$(path "$CONF_DIR")/config.toml"
+        fi
+        log "installed a starting configuration at $CONF_DIR/config.toml"
+        warn "EDIT $CONF_DIR/config.toml before exposing this node: server.allow_from must list your LAN"
+    else
+        log "keeping the existing configuration at $CONF_DIR/config.toml"
+    fi
+
+    for extra in LICENSE-MIT LICENSE-APACHE; do
+        if [ -f "$STAGE_DIR/$extra" ]; then
+            install -m 0644 "$STAGE_DIR/$extra" "$(path "$CONF_DIR")/$extra"
+        fi
+    done
+}
+
+validate_config() {
+    log "validating the configuration"
+    if ! "$(path "$BIN_DIR")/$DAEMON" --config "$(path "$CONF_DIR")/config.toml" --check-config; then
+        die "the installed configuration is not valid"
+    fi
+}
+
+start_service() {
+    [ -n "$ROOT_PREFIX" ] && { log "test root in use; skipping systemd integration"; return 0; }
+    [ "$NO_START" -eq 1 ] && { log "--no-start given; not enabling the service"; return 0; }
+    command -v systemctl >/dev/null 2>&1 || { warn "systemctl not found; skipping service start"; return 0; }
+
+    systemctl daemon-reload
+    systemctl enable egressdns.service >/dev/null
+    log "starting egressdns.service"
+    if ! systemctl restart egressdns.service; then
+        systemctl status --no-pager --lines 30 egressdns.service >&2 || true
+        die "the service failed to start"
+    fi
+    sleep 1
+    if ! systemctl is-active --quiet egressdns.service; then
+        journalctl -u egressdns.service --no-pager --lines 40 >&2 || true
+        die "the service is not active after start"
+    fi
+}
+
+health_check() {
+    [ -n "$ROOT_PREFIX" ] && return 0
+    [ "$NO_START" -eq 1 ] && return 0
+
+    local listen
+    listen="$("$(path "$BIN_DIR")/$DAEMON" --config "$(path "$CONF_DIR")/config.toml" --dump-config 2>/dev/null |
+              awk -F'"' '/^udp_listen/ {print $2; exit}')"
+    listen="${listen:-127.0.0.1:53}"
+    local host port
+    host="${listen%:*}"
+    port="${listen##*:}"
+    host="${host#[}"
+    host="${host%]}"
+    if [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then host="127.0.0.1"; fi
+
+    if ! command -v dig >/dev/null 2>&1; then
+        warn "dig is not installed; skipping the DNS health checks"
+        return 0
+    fi
+
+    log "UDP health check against ${host}:${port}"
+    if ! dig @"$host" -p "$port" +timeout=3 +tries=2 +short example.com A >/dev/null; then
+        warn "the UDP health check did not return an answer"
+        ROLLBACK_NEEDED=1
+        die "post-install UDP health check failed"
+    fi
+    log "TCP health check against ${host}:${port}"
+    if ! dig @"$host" -p "$port" +tcp +timeout=3 +tries=2 +short example.com A >/dev/null; then
+        warn "the TCP health check did not return an answer"
+        ROLLBACK_NEEDED=1
+        die "post-install TCP health check failed"
+    fi
+    log "health checks passed"
+}
+
+main() {
+    parse_args "$@"
+    require_root
+    detect_platform
+    check_port_53
+    trap cleanup EXIT
+    create_user
+    make_dirs
+    backup_existing
+    ROLLBACK_NEEDED=1
+    if [ "$LOCAL_BUILD" -eq 1 ]; then
+        build_locally
+    else
+        download_release
+    fi
+    install_files
+    validate_config
+    start_service
+    health_check
+    ROLLBACK_NEEDED=0
+
+    cat <<MSG
+
+EgressDNS is installed.
+
+  configuration   $CONF_DIR/config.toml
+  state           $STATE_DIR
+  service         systemctl status egressdns
+  control         $CONTROL status
+
+Next steps:
+  1. Edit $CONF_DIR/config.toml and set server.allow_from to your LAN networks.
+  2. sudo systemctl reload egressdns
+  3. $CONTROL status
+
+MSG
+}
+
+main "$@"

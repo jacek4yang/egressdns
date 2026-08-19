@@ -1,0 +1,6 @@
+usr/bin/egressdnsd
+usr/bin/egressdnsctl
+etc/egressdns/config.toml
+lib/systemd/system/egressdns.service
+usr/lib/sysusers.d/egressdns.conf
+usr/lib/tmpfiles.d/egressdns.conf

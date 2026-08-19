@@ -1,0 +1,35 @@
+# EgressDNS — minimal configuration.
+#
+# The smallest configuration that starts and resolves. It listens on loopback only, so it
+# is safe to run on a workstation while you experiment. See config/egressdns.example.toml
+# for the fully annotated version and config/egressdns.production.toml for a LAN-facing
+# deployment.
+
+[server]
+udp_listen = ["127.0.0.1:1053"]
+tcp_listen = ["127.0.0.1:1053"]
+allow_from = ["127.0.0.0/8", "::1/128"]
+
+[[upstream.groups]]
+name = "default"
+
+[[upstream.groups.servers]]
+name = "cloudflare-dot"
+transport = "dot"
+addresses = ["1.1.1.1", "1.0.0.1"]
+server_name = "cloudflare-dns.com"
+
+[[upstream.groups.servers]]
+name = "quad9-dot"
+transport = "dot"
+addresses = ["9.9.9.9", "149.112.112.112"]
+server_name = "dns.quad9.net"
+
+[storage]
+enabled = false
+
+[admin]
+socket = "/tmp/egressdns-admin.sock"
+
+[metrics]
+listen = "127.0.0.1:9153"

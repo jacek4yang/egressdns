@@ -1,0 +1,10 @@
+# The toolchain this project is developed, tested and released with.
+#
+# Pinning the toolchain makes CI, local builds and release builds byte-comparable, and
+# makes a compiler regression a deliberate, reviewable change rather than a surprise.
+# `rustup` installs this automatically on first use.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+profile = "minimal"

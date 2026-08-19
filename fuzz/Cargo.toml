@@ -1,0 +1,66 @@
+[package]
+name = "egressdns-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+egressdns = { path = ".." }
+hickory-proto = { version = "0.26", default-features = false, features = ["std", "dnssec-ring"] }
+
+[[bin]]
+name = "dns_message"
+path = "fuzz_targets/dns_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seed_parser"
+path = "fuzz_targets/seed_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cloudflare_prefix_json"
+path = "fuzz_targets/cloudflare_prefix_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dataset_parser"
+path = "fuzz_targets/dataset_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admin_protocol"
+path = "fuzz_targets/admin_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "der_walker"
+path = "fuzz_targets/der_walker.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate is intentionally outside the main workspace so that `cargo build
+# --workspace` on stable never tries to build it: cargo-fuzz needs a nightly toolchain.
+[workspace]

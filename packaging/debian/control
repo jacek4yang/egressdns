@@ -1,0 +1,29 @@
+Source: egressdns
+Section: net
+Priority: optional
+Maintainer: EgressDNS maintainers <egressdns@example.invalid>
+Build-Depends: debhelper-compat (= 13),
+               cargo (>= 1.88),
+               rustc (>= 1.88),
+               pkg-config
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/OWNER/egressdns
+
+Package: egressdns
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, ca-certificates
+Suggests: dnsutils, nftables
+Conflicts: dnsmasq, unbound, bind9
+Description: adaptive caching DNS forwarder for single-egress networks
+ EgressDNS is a caching DNS forwarder for enterprise LANs that reach the Internet
+ through a single egress. It forwards over UDP, TCP, DNS-over-TLS, DNS-over-HTTPS
+ (HTTP/2 and HTTP/3) and DNS-over-QUIC, validates DNSSEC, and adapts its upstream
+ selection and answer ordering to measurements taken on the live network.
+ .
+ All measurement is background work: a client query is never blocked on a probe, a
+ dataset refresh or a prediction. If every adaptive subsystem fails, the daemon
+ degrades to a correct caching forwarder rather than failing.
+ .
+ It performs no answer synthesis of any kind - no DNS64, no synthetic CNAMEs, no
+ AAAA suppression - and never returns third-party proxy or relay addresses.

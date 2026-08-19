@@ -1,0 +1,78 @@
+[Unit]
+Description=EgressDNS adaptive caching DNS forwarder
+Documentation=https://github.com/OWNER/egressdns
+After=network-online.target
+Wants=network-online.target
+# Refuse to start if something else already owns port 53.
+Conflicts=systemd-resolved.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/local/bin/egressdnsd --config /etc/egressdns/config.toml --check-config
+ExecStart=/usr/local/bin/egressdnsd --config /etc/egressdns/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+
+User=egressdns
+Group=egressdns
+
+# The only privilege the daemon keeps is the ability to bind ports below 1024. It never
+# runs as root, and it can never acquire any other capability.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Filesystem
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+StateDirectory=egressdns
+StateDirectoryMode=0750
+RuntimeDirectory=egressdns
+RuntimeDirectoryMode=0750
+ReadWritePaths=/var/lib/egressdns /run/egressdns
+ReadOnlyPaths=/etc/egressdns
+
+# Kernel and process
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0027
+
+# AF_NETLINK is required by getifaddrs(3), which the IPv4/IPv6 environment detector uses.
+# AF_UNIX is required by the administration socket and by the systemd notify socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# The watchdog is fed only while the daemon is ready to answer queries, so a wedged
+# resolver is restarted rather than left running.
+WatchdogSec=30s
+
+LimitNOFILE=131072
+LimitNPROC=512
+TasksMax=1024
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=egressdns
+
+[Install]
+WantedBy=multi-user.target

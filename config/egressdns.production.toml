@@ -1,0 +1,326 @@
+# EgressDNS — production configuration for a company LAN with a single Internet egress.
+#
+#   *** YOU MUST EDIT server.allow_from BEFORE DEPLOYING. ***
+#
+# The example networks below are placeholders. Leaving them in place either refuses your
+# real clients or, worse, permits ranges you did not intend. Everything else in this file
+# is a defensible default for a two-node deployment behind one egress.
+#
+# Deploy on two independent nodes, for example 10.0.0.53 and 10.0.0.54, and hand both to
+# clients through DHCP. The nodes share no state and each keeps its own live cache.
+
+# ---------------------------------------------------------------------------
+# Inbound DNS service
+# ---------------------------------------------------------------------------
+[server]
+# Bind the node's own LAN address plus loopback. Binding 0.0.0.0 is possible but makes the
+# ACL the only thing between you and an open resolver; prefer explicit addresses.
+udp_listen = ["0.0.0.0:53", "[::]:53"]
+tcp_listen = ["0.0.0.0:53", "[::]:53"]
+
+# EDIT THIS. Default-deny: only these networks may query the resolver. Do not paste the
+# whole of RFC 1918 unless you really use all of it.
+allow_from = [
+    "10.0.0.0/16",       # EXAMPLE — replace with your LAN
+    "192.168.10.0/24",   # EXAMPLE — replace with your LAN
+    "127.0.0.0/8",
+    "::1/128",
+]
+deny_from = []
+
+foreground_budget = "2s500ms"
+any_policy = "minimal"
+
+# Handling of IANA special-use domain names (RFC 6761, 6762, 7686, 8375).
+#   "local"   - answer them here: "localhost" gets the loopback address, and "*.local",
+#               "*.invalid", "*.onion", "*.home.arpa" and the reverse zones for private
+#               and link-local address space get NXDOMAIN. Internal names never leave the
+#               LAN. This is the default.
+#   "forward" - send them upstream like any other name. Correct only when the configured
+#               upstream is itself the internal resolver for those names.
+# Locally configured zones, hosts and suffix rules are always consulted first, so pointing
+# home.arpa. at an internal resolver with a [[local.suffix_rules]] entry still works with
+# the default setting.
+special_use = "local"
+
+[server.udp]
+max_payload = 1232
+recv_buffer_bytes = 8388608
+send_buffer_bytes = 8388608
+reuse_port = false
+workers_per_socket = 1
+
+[server.tcp]
+idle_timeout = "10s"
+max_connection_lifetime = "300s"
+max_connections = 8192
+max_connections_per_client = 128
+max_pipelined_queries = 256
+max_message_bytes = 65535
+advertise_edns_keepalive = true
+
+[server.rate_limit]
+enabled = true
+per_client_qps = 4000
+per_client_burst = 8000
+global_qps = 300000
+global_burst = 600000
+client_table_size = 131072
+
+# ---------------------------------------------------------------------------
+# Cache and TTL policy
+# ---------------------------------------------------------------------------
+[cache]
+# Byte-bounded, not entry-bounded: a DNS answer can be two hundred bytes or two
+# kilobytes, so an entry limit does not bound memory. Measured steady-state RSS is
+# roughly 15 MB + 1.6x this budget, so 768 MiB of cache implies planning for ~1.3 GB RSS.
+max_memory_bytes = 805306368
+failure_max_entries = 50000
+variant_max_memory_bytes = 67108864
+quality_max_entries = 200000
+internal_max_ttl = 86400
+negative_max_ttl = 3600
+failure_min_ttl = "1s"
+failure_max_ttl = "300s"
+
+[ttl]
+cap_default = 300
+cap_optimized_multi = 90
+cap_cloudflare_preserve = 60
+cap_cloudflare_augment = 25
+cap_network_change = 15
+cap_serve_stale = 30
+network_change_window = "300s"
+
+[serve_stale]
+enabled = true
+max_stale = "24h"
+client_timeout = "1s500ms"
+retry_interval = "30s"
+include_ede = true
+
+[prefetch]
+enabled = true
+trigger_fraction = 0.15
+min_hits = 3
+hot_set_size = 50000
+global_qps = 100
+per_key_min_interval = "5s"
+warm_on_start = 500
+queue_size = 8192
+transition_prediction = false
+
+[ranking]
+enabled = true
+hysteresis = 0.12
+min_successes_to_lead = 3
+exploration_rate = 0.02
+
+# ---------------------------------------------------------------------------
+# Upstream resolvers
+# ---------------------------------------------------------------------------
+# Two independent operators over two different encrypted transports. Both carry literal
+# bootstrap addresses, so the resolver never needs to resolve its own upstream.
+[upstream]
+default_group = "default"
+
+[upstream.tls]
+use_system_roots = true
+extra_ca_files = []
+session_resumption = true
+quic_zero_rtt = false
+
+[[upstream.groups]]
+name = "default"
+
+[[upstream.groups.servers]]
+name = "cloudflare-dot"
+transport = "dot"
+addresses = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
+server_name = "cloudflare-dns.com"
+weight = 100
+
+[[upstream.groups.servers]]
+name = "quad9-dot"
+transport = "dot"
+addresses = ["9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"]
+server_name = "dns.quad9.net"
+weight = 100
+
+[[upstream.groups.servers]]
+name = "cloudflare-doh2"
+transport = "doh2"
+addresses = ["1.1.1.1", "1.0.0.1"]
+server_name = "cloudflare-dns.com"
+path = "/dns-query"
+weight = 80
+
+[upstream.groups.scheduler]
+hedge_enabled = true
+hedge_percentile = 0.95
+hedge_min_delay = "20ms"
+hedge_max_delay = "300ms"
+hedge_max_fraction = 0.15
+query_timeout = "1s500ms"
+explore_rate = 0.02
+circuit_failure_threshold = 5
+circuit_open_duration = "20s"
+circuit_half_open_successes = 2
+emergency_fanout = true
+emergency_fanout_max = 3
+
+# ---------------------------------------------------------------------------
+# DNSSEC and privacy
+# ---------------------------------------------------------------------------
+[dnssec]
+mode = "validate"
+trust_upstream_ad = false
+# Restart-required: the validation semaphore is created once at startup.
+max_concurrent_validations = 512
+max_validation_depth = 12
+validation_cache_entries = 50000
+extended_errors = true
+
+[ecs]
+# An inbound ECS option from a client is always stripped, under every mode: forwarding
+# one would leak a client's network to the upstream, so it is not a setting.
+mode = "disabled"
+
+# ---------------------------------------------------------------------------
+# Probing and Cloudflare optimization
+# ---------------------------------------------------------------------------
+[probe]
+enabled = true
+queue_size = 16384
+tcp_concurrency = 32
+tls_concurrency = 16
+http_concurrency = 8
+global_connections_per_second = 64
+tcp_timeout = "1s500ms"
+tls_timeout = "3s"
+http_timeout = "5s"
+per_ip_cooldown = "300s"
+per_prefix_cooldown = "30s"
+per_domain_cooldown = "600s"
+max_candidates_per_rrset = 4
+extra_ports = [443]
+max_response_bytes = 16384
+# Redirects are never followed: a probe measures one address, and following a redirect
+# would measure a different host chosen by the peer.
+# HTTP/3 probing is attempted when the peer advertises h3; a UDP-blocked path is recorded
+# as unsupported rather than as a failure.
+enable_http3 = true
+daily_bandwidth_budget_bytes = 67108864
+allow_special_use_targets = []
+
+[network]
+enabled = true
+poll_interval = "5s"
+debounce = "3s"
+confidence_decay_on_change = 0.25
+relearn_window = "600s"
+
+[cloudflare]
+enabled = true
+# verified-augment prepends at most two domain-verified Cloudflare addresses to eligible,
+# non-DNSSEC-secure HTTPS answers, and always keeps every original address. Any doubt
+# degrades to preserve mode, which only reorders what the upstream already returned.
+mode = "verified-augment"
+probe_hosts = ["speed.cloudflare.com", "cf.090227.xyz"]
+allow_domains = []
+deny_domains = [
+    # Never optimize anything where a surprise would be expensive.
+    ".bank.example",
+]
+candidate_pool_max = 8192
+
+[cloudflare.official]
+api_url = "https://api.cloudflare.com/client/v4/ips"
+ipv4_url = "https://www.cloudflare.com/ips-v4"
+ipv6_url = "https://www.cloudflare.com/ips-v6"
+refresh_interval = "24h"
+timeout = "10s"
+max_response_bytes = 262144
+min_ipv4_prefixes = 8
+min_ipv6_prefixes = 4
+cache_file = "/var/lib/egressdns/cloudflare-prefixes.json"
+
+# Untrusted candidate hints. Observed responses have repeatedly included addresses that do
+# not belong to Cloudflare, so every address is filtered against the official prefix
+# snapshot and then validated locally before it can influence any answer.
+[cloudflare.seeds]
+enabled = true
+refresh_interval = "40m"
+timeout = "10s"
+max_response_bytes = 131072
+max_addresses_per_response = 256
+resolve_hostnames = true
+
+[[cloudflare.seeds.endpoints]]
+name = "ct"
+url = "https://cf.090227.xyz/ct?ips=6"
+enabled = true
+
+[[cloudflare.seeds.endpoints]]
+name = "cu"
+url = "https://cf.090227.xyz/cu"
+enabled = true
+
+[[cloudflare.seeds.endpoints]]
+name = "cmcc"
+url = "https://cf.090227.xyz/cmcc?ips=8"
+enabled = true
+
+[cloudflare.sampling]
+# Sampling is IPv4-only by construction; there is deliberately no IPv6 switch, because
+# random traversal of a /32 has no defensible expected yield.
+enabled = true
+round_interval = "300s"
+addresses_per_round = 32
+max_new_candidates_per_hour = 512
+buckets_per_prefix = 64
+exploit_fraction = 0.3
+seed = 6841635893428224001
+
+[cloudflare.augment]
+max_added = 2
+min_validations = 3
+validation_ttl = "1h"
+min_advantage = 0.12
+min_samples = 8
+
+# ---------------------------------------------------------------------------
+# Storage and observability
+# ---------------------------------------------------------------------------
+[storage]
+enabled = true
+path = "/var/lib/egressdns/state.sqlite3"
+flush_interval = "30s"
+queue_size = 16384
+max_quality_rows = 100000
+max_hot_rows = 50000
+max_candidate_rows = 50000
+row_max_age = "30d"
+
+[metrics]
+enabled = true
+listen = "127.0.0.1:9153"
+allow_non_loopback = false
+
+[logging]
+level = "info"
+json = true
+query_log = false
+query_log_sample = 0.01
+
+[admin]
+enabled = true
+socket = "/run/egressdns/admin.sock"
+socket_mode = 0o660
+max_request_bytes = 65536
+
+[resources]
+max_inflight_queries = 40000
+max_inflight_upstream = 8000
+max_blocking_threads = 4
+systemd_watchdog = true

@@ -1,0 +1,44 @@
+#!/bin/sh
+# postinst for egressdns
+#
+# Creates the service account and state directory. Deliberately does NOT start the
+# service: port 53 is normally already owned by systemd-resolved or another resolver, and
+# silently taking it over would break name resolution on the machine.
+
+set -e
+
+case "$1" in
+    configure)
+        if ! getent group egressdns >/dev/null; then
+            addgroup --system egressdns
+        fi
+        if ! getent passwd egressdns >/dev/null; then
+            adduser --system --ingroup egressdns --no-create-home \
+                    --home /var/lib/egressdns --shell /usr/sbin/nologin \
+                    --gecos "EgressDNS resolver" egressdns
+        fi
+
+        install -d -o egressdns -g egressdns -m 0750 /var/lib/egressdns
+        install -d -o root     -g egressdns -m 0750 /etc/egressdns
+        if [ -f /etc/egressdns/config.toml ]; then
+            chown root:egressdns /etc/egressdns/config.toml
+            chmod 0640 /etc/egressdns/config.toml
+        fi
+
+        setcap 'cap_net_bind_service=+ep' /usr/bin/egressdnsd 2>/dev/null || true
+
+        echo "egressdns: edit /etc/egressdns/config.toml (server.allow_from must list your LAN)," >&2
+        echo "           then: systemctl enable --now egressdns" >&2
+        echo "           port 53 is not taken over automatically; see docs/OPERATIONS.md section 6." >&2
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

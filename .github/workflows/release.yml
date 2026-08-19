@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and publish
+        required: true
+
+# `contents: write` is needed to create the release. Nothing else is granted, and no
+# third-party action runs in this workflow, so the token is only ever handed to the
+# GitHub CLI.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          set -Eeuo pipefail
+          TAG="${GITHUB_REF_NAME:-}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no tag to release" >&2
+            exit 1
+          fi
+          # The tag must match the version in Cargo.toml, or the release archive would
+          # advertise a version the binary does not report.
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "v${CARGO_VERSION}" ]; then
+            echo "tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install the pinned toolchain and cross tooling
+        run: |
+          set -Eeuo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # Both targets are built in one job so the artifacts never leave the runner. The
+      # upload/download-artifact round trip this replaced widened the trust boundary for
+      # no benefit at this scale.
+      - name: Build every target
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: |
+          set -Eeuo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            cargo build --release --locked --target "$target"
+          done
+
+      - name: Verify the built binary reports the tagged version
+        run: |
+          set -Eeuo pipefail
+          REPORTED="$(./target/x86_64-unknown-linux-gnu/release/egressdnsd --version)"
+          echo "$REPORTED"
+          case "$REPORTED" in
+            *"${{ steps.tag.outputs.tag }}"*|*"${GITHUB_REF_NAME#v}"*) ;;
+            *) echo "binary does not report the tagged version" >&2; exit 1 ;;
+          esac
+
+      - name: Stage the release archives
+        run: |
+          set -Eeuo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          mkdir -p dist
+          for pair in "x86_64-unknown-linux-gnu:x86_64" "aarch64-unknown-linux-gnu:aarch64"; do
+            target="${pair%%:*}"
+            arch="${pair##*:}"
+            STAGE="egressdns"
+            rm -rf "$STAGE"
+            mkdir -p "$STAGE"
+            cp "target/${target}/release/egressdnsd"  "$STAGE/"
+            cp "target/${target}/release/egressdnsctl" "$STAGE/"
+            cp packaging/systemd/egressdns.service "$STAGE/"
+            cp config/egressdns.production.toml "$STAGE/"
+            cp LICENSE-MIT LICENSE-APACHE "$STAGE/"
+            cp install.sh upgrade.sh uninstall.sh "$STAGE/"
+            cp docs/INSTALL-RELEASE.md "$STAGE/INSTALL.md"
+            ARCHIVE="dist/egressdns-${TAG}-linux-${arch}.tar.gz"
+            # Reproducible-ish: fixed ownership, sorted entries, and the tag's commit date
+            # as the mtime, so two builds of the same tag produce the same bytes.
+            tar --owner=0 --group=0 --numeric-owner --sort=name \
+                --mtime="@$(git log -1 --format=%ct)" \
+                -czf "$ARCHIVE" "$STAGE"
+            rm -rf "$STAGE"
+          done
+          cd dist
+          sha256sum egressdns-*-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # `gh` is preinstalled on GitHub-hosted runners, so publishing needs no third-party
+      # action. The release is created as a draft and then published, which means a
+      # partially uploaded release is never visible.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; uploading assets only"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "EgressDNS ${TAG}" \
+              --generate-notes \
+              --draft \
+              dist/*
+            gh release edit "$TAG" --draft=false
+          fi
