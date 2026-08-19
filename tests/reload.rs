@@ -137,6 +137,52 @@ async fn negative_max_ttl_follows_a_reload() {
     );
 }
 
+/// DNSSEC settings are reloadable, so enabling validation by reload must change what the
+/// data plane returns — a reload that only swaps the in-memory config would keep serving
+/// unvalidated answers.
+///
+/// The mock upstream supplies no chain of trust, so validation must fail closed: SERVFAIL,
+/// never an unvalidated NOERROR.
+#[tokio::test]
+async fn enabling_dnssec_validation_by_reload_fails_closed() {
+    let (handler, addr, _servers) = mock().await;
+    handler.set(
+        "unsigned.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("unsigned.test.", 60, "192.0.2.9")]),
+    );
+    handler.set(
+        "unsigned-two.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("unsigned-two.test.", 60, "192.0.2.10")]),
+    );
+    let base = common::udp_upstream_fragment(addr);
+    let daemon = Daemon::start(&base).await;
+
+    let before = daemon
+        .query_udp(&common::query("unsigned.test.", RecordType::A, true))
+        .await;
+    assert_eq!(
+        before.metadata.response_code,
+        hickory_proto::op::ResponseCode::NoError,
+        "with dnssec.mode = off the unsigned answer must be served"
+    );
+
+    daemon
+        .reload_with(&base.replace("[dnssec]\nmode = \"off\"", "[dnssec]\nmode = \"validate\""))
+        .expect("dnssec.mode is reloadable");
+
+    // A fresh name, so the answer cannot come from the pre-reload cache entry.
+    let after = daemon
+        .query_udp(&common::query("unsigned-two.test.", RecordType::A, true))
+        .await;
+    assert_eq!(
+        after.metadata.response_code,
+        hickory_proto::op::ResponseCode::ServFail,
+        "validation enabled by reload must fail closed against an upstream with no chain of trust"
+    );
+}
+
 /// Turning probing off by reload must actually stop probe work.
 ///
 /// The probe queue used to be created enabled at startup and never consulted the live
