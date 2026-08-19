@@ -149,6 +149,20 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<RestartRequired> {
         "dnssec.max_concurrent_validations",
         "the validation semaphore is sized once at startup",
     );
+    check(
+        old.cloudflare.candidate_pool_max != new.cloudflare.candidate_pool_max,
+        "cloudflare.candidate_pool_max",
+        "the candidate pool capacity is fixed at construction; resizing would mean \
+         discarding validated candidates",
+    );
+    check(
+        old.cloudflare.sampling.seed != new.cloudflare.sampling.seed
+            || old.cloudflare.sampling.buckets_per_prefix != new.cloudflare.sampling.buckets_per_prefix
+            || old.cloudflare.sampling.exploit_fraction != new.cloudflare.sampling.exploit_fraction,
+        "cloudflare.sampling.seed / cloudflare.sampling.buckets_per_prefix / cloudflare.sampling.exploit_fraction",
+        "the sampler is built once at startup; rebuilding it would discard per-bucket \
+         history",
+    );
 
     // ---- persistence ------------------------------------------------------------------
     check(
@@ -220,6 +234,8 @@ const MUTATIONS: &[Mutation] = &[
     |c| c.prefetch.hot_set_size += 1,
     |c| c.probe.queue_size += 1,
     |c| c.dnssec.max_concurrent_validations += 1,
+    |c| c.cloudflare.candidate_pool_max += 1,
+    |c| c.cloudflare.sampling.seed += 1,
     |c| c.storage.enabled = !c.storage.enabled,
     |c| c.logging.json = !c.logging.json,
 ];
@@ -371,6 +387,22 @@ mod tests {
             (
                 "dnssec.max_concurrent_validations",
                 Box::new(|c: &mut Config| c.dnssec.max_concurrent_validations += 1),
+            ),
+            (
+                "cloudflare.candidate_pool_max",
+                Box::new(|c: &mut Config| c.cloudflare.candidate_pool_max += 1),
+            ),
+            (
+                "cloudflare.sampling.seed",
+                Box::new(|c: &mut Config| c.cloudflare.sampling.seed += 1),
+            ),
+            (
+                "cloudflare.sampling.buckets_per_prefix",
+                Box::new(|c: &mut Config| c.cloudflare.sampling.buckets_per_prefix += 1),
+            ),
+            (
+                "cloudflare.sampling.exploit_fraction",
+                Box::new(|c: &mut Config| c.cloudflare.sampling.exploit_fraction = 0.9),
             ),
             (
                 "logging.level",

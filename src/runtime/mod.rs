@@ -311,6 +311,7 @@ impl App {
         )
         .expect("test configuration builds a runtime state");
         self.state.store(Arc::new(state));
+        self.cloudflare.reconfigure(&config.cloudflare);
     }
 
     /// Whether the daemon is ready.
@@ -412,6 +413,7 @@ impl App {
         // than the request path. Updated here so the whole reload stays one logical step.
         self.probes.set_enabled(candidate.probe.enabled);
         self.prefetch.set_enabled(candidate.prefetch.enabled);
+        self.cloudflare.reconfigure(&candidate.cloudflare);
         self.reloads.fetch_add(1, Ordering::Relaxed);
         *self.last_reload_error.lock() = None;
         metrics::counter!(

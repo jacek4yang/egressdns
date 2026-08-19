@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,8 +92,12 @@ pub struct CloudflareState {
     validations: Mutex<HashMap<ValidationKey, DomainValidation>>,
     baseline: Mutex<HashMap<Arc<str>, BaselineState>>,
     sources: Mutex<HashMap<Arc<str>, SourceStatus>>,
-    enabled: bool,
-    mode: CloudflareMode,
+    /// Master switch, stored atomically so a reload can flip it without rebuilding the
+    /// state. Read once per eligible answer with a relaxed load.
+    enabled: AtomicBool,
+    /// Configured response mode, encoded like `mode_override` so a reload can replace it
+    /// with a relaxed store. Never 0; use [`mode_from_u8`] to decode.
+    mode: AtomicU8,
     /// Runtime override of `mode`, set through the admin socket.
     ///
     /// Encoded as a `u8` so it can be read from the answer path with a relaxed atomic load
@@ -140,8 +144,8 @@ impl CloudflareState {
             validations: Mutex::new(HashMap::new()),
             baseline: Mutex::new(HashMap::new()),
             sources: Mutex::new(HashMap::new()),
-            enabled: cfg.enabled,
-            mode: cfg.mode,
+            enabled: AtomicBool::new(cfg.enabled),
+            mode: AtomicU8::new(mode_to_u8(cfg.mode)),
             mode_override: AtomicU8::new(0),
             max_validation_entries: cfg.candidate_pool_max.saturating_mul(4).max(1_024),
         }
@@ -149,7 +153,7 @@ impl CloudflareState {
 
     /// Whether the subsystem is enabled.
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// Effective response mode: the runtime override when one is set, else the configured
@@ -157,13 +161,38 @@ impl CloudflareState {
     pub fn mode(&self) -> CloudflareMode {
         match mode_from_u8(self.mode_override.load(Ordering::Relaxed)) {
             Some(m) => m,
-            None => self.mode,
+            None => self.configured_mode(),
         }
     }
 
     /// The mode from the configuration file, ignoring any runtime override.
     pub fn configured_mode(&self) -> CloudflareMode {
-        self.mode
+        // `mode` is only ever written through `mode_to_u8`, which never produces a value
+        // `mode_from_u8` rejects; the fallback is unreachable but keeps this total.
+        mode_from_u8(self.mode.load(Ordering::Relaxed)).unwrap_or(CloudflareMode::Off)
+    }
+
+    /// Apply the reloadable part of a reloaded configuration.
+    ///
+    /// Only `enabled` and `mode` can change live: the candidate pool, the sampler and the
+    /// validation bounds are sized once at construction, and [`crate::config::reload`]
+    /// refuses a reload that tries to change them. If a reload weakened the configured
+    /// mode below an active runtime override, the override would now strengthen it —
+    /// violating the "an override may only weaken" invariant — so it is cleared.
+    pub fn reconfigure(&self, cfg: &CloudflareConfig) {
+        self.enabled.store(cfg.enabled, Ordering::Relaxed);
+        self.mode.store(mode_to_u8(cfg.mode), Ordering::Relaxed);
+        if let Some(over) = self.mode_override() {
+            if mode_rank(over) > mode_rank(cfg.mode) {
+                self.mode_override.store(0, Ordering::Relaxed);
+                tracing::warn!(
+                    event = "cloudflare.mode_override_cleared",
+                    mode = ?cfg.mode,
+                    "the reloaded configured mode is weaker than the runtime override; \
+                     the override was cleared"
+                );
+            }
+        }
     }
 
     /// The runtime override, if one is in force.
@@ -178,7 +207,7 @@ impl CloudflareState {
     /// incident; turning it up is a configuration change, so that it goes through
     /// validation and survives a restart in a form somebody can review.
     pub fn set_mode_override(&self, mode: CloudflareMode) -> Result<(), &'static str> {
-        if mode_rank(mode) > mode_rank(self.mode) {
+        if mode_rank(mode) > mode_rank(self.configured_mode()) {
             return Err(
                 "a runtime override may only weaken the configured mode; edit the \
                  configuration and reload to strengthen it",
@@ -189,7 +218,7 @@ impl CloudflareState {
         tracing::warn!(
             event = "cloudflare.mode_override",
             mode = ?mode,
-            configured = ?self.mode,
+            configured = ?self.configured_mode(),
         );
         Ok(())
     }
@@ -197,7 +226,10 @@ impl CloudflareState {
     /// Drop any runtime override and return to the configured mode.
     pub fn clear_mode_override(&self) {
         if self.mode_override.swap(0, Ordering::Relaxed) != 0 {
-            tracing::warn!(event = "cloudflare.mode_override_cleared", mode = ?self.mode);
+            tracing::warn!(
+                event = "cloudflare.mode_override_cleared",
+                mode = ?self.configured_mode(),
+            );
         }
     }
 
@@ -555,5 +587,66 @@ mod tests {
         assert_eq!(state.mode(), CloudflareMode::Off);
         // Setting the same mode is a no-op, not an error.
         assert!(state.set_mode_override(CloudflareMode::Off).is_ok());
+    }
+
+    fn reload_cfg(enabled: bool, mode: CloudflareMode) -> CloudflareConfig {
+        CloudflareConfig {
+            enabled,
+            mode,
+            ..CloudflareConfig::default()
+        }
+    }
+
+    #[test]
+    fn reconfigure_applies_enabled_and_mode_without_a_restart() {
+        let state = CloudflareState::new(&reload_cfg(false, CloudflareMode::Off));
+        assert!(!state.enabled());
+        assert_eq!(state.mode(), CloudflareMode::Off);
+
+        state.reconfigure(&reload_cfg(true, CloudflareMode::Preserve));
+        assert!(state.enabled(), "enabled must flip on reconfigure");
+        assert_eq!(state.mode(), CloudflareMode::Preserve);
+        assert_eq!(state.configured_mode(), CloudflareMode::Preserve);
+
+        state.reconfigure(&reload_cfg(false, CloudflareMode::VerifiedAugment));
+        assert!(!state.enabled(), "disabling must also flip on reconfigure");
+        assert_eq!(state.mode(), CloudflareMode::VerifiedAugment);
+    }
+
+    #[test]
+    fn reconfigure_clears_an_override_that_the_new_mode_makes_too_strong() {
+        let state = CloudflareState::new(&reload_cfg(true, CloudflareMode::VerifiedAugment));
+        state
+            .set_mode_override(CloudflareMode::Preserve)
+            .expect("weakening is allowed");
+        assert_eq!(state.mode(), CloudflareMode::Preserve);
+
+        // The reload weakens the configured mode below the active override; the override
+        // would now strengthen, which is never allowed, so it must be cleared.
+        state.reconfigure(&reload_cfg(true, CloudflareMode::Off));
+        assert!(state.mode_override().is_none());
+        assert_eq!(state.mode(), CloudflareMode::Off);
+    }
+
+    #[test]
+    fn reconfigure_keeps_an_override_that_still_weakens_the_new_mode() {
+        let state = CloudflareState::new(&reload_cfg(true, CloudflareMode::Preserve));
+        state
+            .set_mode_override(CloudflareMode::Off)
+            .expect("weakening is allowed");
+
+        // Strengthening the configured mode keeps a weaker override valid and in force.
+        state.reconfigure(&reload_cfg(true, CloudflareMode::VerifiedAugment));
+        assert_eq!(state.mode_override(), Some(CloudflareMode::Off));
+        assert_eq!(state.mode(), CloudflareMode::Off);
+        assert_eq!(state.configured_mode(), CloudflareMode::VerifiedAugment);
+    }
+
+    #[test]
+    fn an_override_set_after_a_reload_is_bounded_by_the_new_configured_mode() {
+        let state = CloudflareState::new(&reload_cfg(true, CloudflareMode::VerifiedAugment));
+        state.reconfigure(&reload_cfg(true, CloudflareMode::Off));
+        assert!(state.set_mode_override(CloudflareMode::Preserve).is_err());
+        assert_eq!(state.mode(), CloudflareMode::Off);
     }
 }

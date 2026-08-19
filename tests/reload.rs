@@ -199,6 +199,140 @@ async fn a_restart_required_change_is_refused_and_leaves_the_process_untouched()
     );
 }
 
+/// Reloading `cloudflare.mode` must reach the shared state the answer path reads.
+///
+/// `CloudflareState` is retained across reloads and used to capture `mode` at
+/// construction, so a reloaded mode was accepted, reported as applied, and ignored by
+/// the foreground until a restart.
+#[tokio::test]
+async fn reloading_the_cloudflare_mode_reaches_the_foreground_state() {
+    let (_handler, addr, _servers) = mock().await;
+    let base = common::udp_upstream_fragment(addr);
+    // verified-augment is only valid with probing on.
+    let probing = base.replace("[probe]\nenabled = false", "[probe]\nenabled = true");
+    let preserve = format!("{probing}\n[cloudflare]\nenabled = true\nmode = \"preserve\"\n");
+    let daemon = Daemon::start(&preserve).await;
+    assert_eq!(
+        daemon.app.cloudflare.mode(),
+        egressdns::config::CloudflareMode::Preserve,
+        "the configured mode must be live at startup"
+    );
+
+    let augment = preserve.replace("mode = \"preserve\"", "mode = \"verified-augment\"");
+    daemon
+        .reload_with(&augment)
+        .expect("cloudflare.mode is reloadable");
+
+    assert_eq!(
+        daemon.app.cloudflare.mode(),
+        egressdns::config::CloudflareMode::VerifiedAugment,
+        "the retained Cloudflare state must follow the reloaded mode"
+    );
+    assert_eq!(
+        daemon.app.cloudflare.configured_mode(),
+        egressdns::config::CloudflareMode::VerifiedAugment,
+        "the configured mode, not just the effective one, must follow the reload"
+    );
+
+    // The admin surface reads the same shared state as the answer path.
+    let status = daemon.admin("cloudflare", &["status"]).await;
+    assert!(status.ok, "cloudflare status must succeed: {status:?}");
+    let data = status.data.expect("status payload");
+    assert_eq!(data["mode"].as_str(), Some("verified_augment"));
+    assert_eq!(data["configured_mode"].as_str(), Some("verified_augment"));
+}
+
+/// Toggling `cloudflare.enabled` by reload must flip what the answer path reads.
+#[tokio::test]
+async fn toggling_cloudflare_enabled_by_reload_reaches_the_foreground_state() {
+    let (_handler, addr, _servers) = mock().await;
+    let base = common::udp_upstream_fragment(addr);
+    let daemon = Daemon::start(&base).await;
+    assert!(
+        !daemon.app.cloudflare.enabled(),
+        "the fixture must start with the subsystem disabled"
+    );
+
+    let enabled = format!("{base}\n[cloudflare]\nenabled = true\nmode = \"preserve\"\n");
+    daemon
+        .reload_with(&enabled)
+        .expect("cloudflare.enabled is reloadable");
+    assert!(
+        daemon.app.cloudflare.enabled(),
+        "the retained Cloudflare state must follow the reloaded switch"
+    );
+
+    daemon
+        .reload_with(&base)
+        .expect("cloudflare.enabled is reloadable in both directions");
+    assert!(
+        !daemon.app.cloudflare.enabled(),
+        "disabling the subsystem by reload must not require a restart"
+    );
+}
+
+/// Cloudflare's structural settings are fixed at construction and must be refused.
+#[tokio::test]
+async fn cloudflare_structural_changes_are_refused_as_restart_required() {
+    let (handler, addr, _servers) = mock().await;
+    handler.set(
+        "still-up.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("still-up.test.", 1, "192.0.2.13")]),
+    );
+    let base = common::udp_upstream_fragment(addr);
+    let daemon = Daemon::start(&base).await;
+    let before_reloads = daemon.app.reload_count();
+
+    for (addition, field) in [
+        (
+            "[cloudflare]\ncandidate_pool_max = 8192",
+            "cloudflare.candidate_pool_max",
+        ),
+        (
+            "[cloudflare.sampling]\nseed = 42",
+            "cloudflare.sampling.seed",
+        ),
+        (
+            "[cloudflare.sampling]\nbuckets_per_prefix = 128",
+            "cloudflare.sampling.buckets_per_prefix",
+        ),
+        (
+            "[cloudflare.sampling]\nexploit_fraction = 0.9",
+            "cloudflare.sampling.exploit_fraction",
+        ),
+    ] {
+        let changed = format!("{base}\n{addition}\n");
+        let error = daemon
+            .reload_with(&changed)
+            .expect_err("structural Cloudflare settings must be restart-required");
+        assert!(
+            error.contains(field),
+            "the refusal must name {field}, got: {error}"
+        );
+        assert!(
+            error.contains("restart"),
+            "the refusal must say a restart is required, got: {error}"
+        );
+    }
+
+    assert_eq!(
+        daemon.app.reload_count(),
+        before_reloads,
+        "refused reloads must not be counted as successful"
+    );
+
+    // The daemon must still answer queries normally from the untouched configuration.
+    let response = daemon
+        .query_udp(&common::query("still-up.test.", RecordType::A, false))
+        .await;
+    assert_eq!(
+        common::addresses(&response),
+        vec!["192.0.2.13".parse::<std::net::IpAddr>().expect("ip")],
+        "a refused reload must leave the data plane serving normally"
+    );
+}
+
 /// An invalid configuration must leave a *working* daemon behind, not a half-applied one.
 #[tokio::test]
 async fn an_invalid_reload_leaves_the_runtime_healthy() {
