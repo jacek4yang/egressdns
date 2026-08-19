@@ -386,6 +386,35 @@ start_service() {
     fi
 }
 
+# One canary query, judged on the answer rather than on dig's exit status.
+#
+# `dig` exits 0 for SERVFAIL, REFUSED and NXDOMAIN alike: as far as it is concerned it
+# asked a question and got a reply. A check that only tests the exit status therefore
+# passes against a resolver that refuses or fails every query, which is precisely the
+# state this script exists to catch — see docs/incidents/2026-08-deployment-failure.md,
+# where a daemon that SERVFAILed everything sailed through the old check. So the rcode
+# must be NOERROR *and* the answer section must actually contain an address.
+canary() {
+    local host="$1" port="$2" proto="$3"
+    local out rcode
+    # shellcheck disable=SC2086  # $proto is a single optional dig flag, intentionally split
+    out="$(dig @"$host" -p "$port" $proto +timeout=3 +tries=2 example.com A 2>/dev/null)"
+    if [ -z "$out" ]; then
+        warn "no response from ${host}:${port}"
+        return 1
+    fi
+    rcode="$(printf '%s\n' "$out" | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)"
+    if [ "$rcode" != "NOERROR" ]; then
+        warn "resolver answered ${rcode:-nothing} rather than NOERROR"
+        return 1
+    fi
+    if ! printf '%s\n' "$out" | grep -qE '^[^;].*[[:space:]]IN[[:space:]]+A[[:space:]]'; then
+        warn "resolver returned NOERROR with no address in the answer section"
+        return 1
+    fi
+    return 0
+}
+
 health_check() {
     [ -n "$ROOT_PREFIX" ] && return 0
     [ "$NO_START" -eq 1 ] && return 0
@@ -407,14 +436,12 @@ health_check() {
     fi
 
     log "UDP health check against ${host}:${port}"
-    if ! dig @"$host" -p "$port" +timeout=3 +tries=2 +short example.com A >/dev/null; then
-        warn "the UDP health check did not return an answer"
+    if ! canary "$host" "$port" ""; then
         ROLLBACK_NEEDED=1
         die "post-install UDP health check failed"
     fi
     log "TCP health check against ${host}:${port}"
-    if ! dig @"$host" -p "$port" +tcp +timeout=3 +tries=2 +short example.com A >/dev/null; then
-        warn "the TCP health check did not return an answer"
+    if ! canary "$host" "$port" "+tcp"; then
         ROLLBACK_NEEDED=1
         die "post-install TCP health check failed"
     fi
