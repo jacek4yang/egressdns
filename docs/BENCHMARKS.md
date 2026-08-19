@@ -188,82 +188,82 @@ machine was otherwise idle.
 
 | Benchmark | Mean | 95% CI | What it measures |
 | --- | --- | --- | --- |
-| `path/cache_hit_full` | **2.26 µs** | 2.21 – 2.32 µs | The full in-process pipeline for a cache hit: ACL, rate limit, cache key, lookup, TTL rewrite, response build, serialise. |
-| `cache/hit` | 215.6 ns | 213.1 – 218.5 ns | Cache lookup returning a fresh entry. |
-| `cache/miss` | 173.6 ns | 172.1 – 175.2 ns | Cache lookup that misses. |
-| `cache/key_construction` | 135.9 ns | 134.4 – 138.2 ns | `CacheKey` from question, policy view and DNSSEC mode. |
-| `cache/size_estimate` | 1.93 µs | 1.89 – 1.97 µs | Weighing a cached message for the byte budget. |
-| `acl/allow` | 13.0 ns | 12.97 – 13.12 ns | Client ACL check, permitted. |
-| `acl/deny` | 19.5 ns | 19.44 – 19.62 ns | Client ACL check, refused. |
-| `ratelimit/check` | 67.2 ns | 66.6 – 67.9 ns | Per-client token bucket. |
-| `singleflight/uncontended` | 528.2 ns | 519.3 – 538.7 ns | Uncontended acquire and release. |
+| `path/cache_hit_full` | **1.66 µs** | 1.66 – 1.66 µs | The full in-process pipeline for a cache hit: ACL, rate limit, cache key, lookup, TTL rewrite, response build, serialise. |
+| `cache/hit` | 190.0 ns | 189.6 – 190.3 ns | Cache lookup returning a fresh entry. |
+| `cache/miss` | 152.7 ns | 152.7 – 152.7 ns | Cache lookup that misses. |
+| `cache/key_construction` | 117.2 ns | 117.1 – 117.2 ns | `CacheKey` from question, policy view and DNSSEC mode. |
+| `cache/size_estimate` | 1.76 µs | 1.76 – 1.76 µs | Weighing a cached message for the byte budget. |
+| `acl/allow` | 11.7 ns | 11.7 – 11.7 ns | Client ACL check, permitted. |
+| `acl/deny` | 17.7 ns | 17.6 – 17.9 ns | Client ACL check, refused. |
+| `ratelimit/check` | 57.1 ns | 57.1 – 57.2 ns | Per-client token bucket. |
+| `singleflight/uncontended` | 450.6 ns | 450.5 – 450.7 ns | Uncontended acquire and release. |
 
 ### Message handling
 
 | Benchmark | Mean | 95% CI |
 | --- | --- | --- |
-| `message/parse/1_records` | 482.2 ns | 474.3 – 490.3 ns |
-| `message/parse/4_records` | 1.06 µs | 1.04 – 1.09 µs |
-| `message/parse/16_records` | 3.03 µs | 2.99 – 3.06 µs |
-| `message/serialize/1_records` | 752.3 ns | 738.3 – 771.7 ns |
-| `message/serialize/4_records` | 1.32 µs | 1.28 – 1.38 µs |
-| `message/serialize/16_records` | 3.28 µs | 3.25 – 3.32 µs |
-| `message/ttl_rewrite` | 319.6 ns | 287.7 – 348.2 ns |
-| `message/fingerprint` | 3.79 µs | 3.76 – 3.81 µs |
+| `message/parse/1_records` | 380.7 ns | 380.2 – 381.4 ns |
+| `message/parse/4_records` | 824.3 ns | 822.7 – 826.4 ns |
+| `message/parse/16_records` | 2.36 µs | 2.35 – 2.37 µs |
+| `message/serialize/1_records` | 609.8 ns | 609.6 – 610.1 ns |
+| `message/serialize/4_records` | 1.14 µs | 1.14 – 1.14 µs |
+| `message/serialize/16_records` | 3.12 µs | 3.12 – 3.13 µs |
+| `message/ttl_rewrite` | 257.6 ns | 235.9 – 274.3 ns |
+| `message/fingerprint` | 3.37 µs | 3.37 – 3.37 µs |
 
 ### Ranking
 
 | Benchmark | Mean | 95% CI |
 | --- | --- | --- |
-| `ranking/order/2_addresses` | 319.2 ns | 315.9 – 322.7 ns |
-| `ranking/order/4_addresses` | 581.0 ns | 574.9 – 588.5 ns |
-| `ranking/order/8_addresses` | 957.2 ns | 944.2 – 972.5 ns |
-| `ranking/order/16_addresses` | 1.77 µs | 1.74 – 1.82 µs |
-| `ranking/expected_cost` | 67.7 ns | 67.0 – 68.4 ns |
-| `ranking/record_observation` | 19.4 ns | 18.8 – 20.1 ns |
+| `ranking/order/2_addresses` | 228.0 ns | 228.0 – 228.1 ns |
+| `ranking/order/4_addresses` | 410.5 ns | 410.4 – 410.6 ns |
+| `ranking/order/8_addresses` | 774.2 ns | 773.9 – 774.6 ns |
+| `ranking/order/16_addresses` | 1.49 µs | 1.49 – 1.49 µs |
+| `ranking/expected_cost` | 55.9 ns | 55.9 – 55.9 ns |
+| `ranking/record_observation` | 16.6 ns | 16.6 – 16.6 ns |
 
 ### Cloudflare classification
 
 | Benchmark | Mean | 95% CI |
 | --- | --- | --- |
-| `cloudflare/prefix_hit_v4` | 5.50 ns | 5.30 – 5.77 ns |
-| `cloudflare/prefix_miss_v4` | 13.7 ns | 13.5 – 14.0 ns |
-| `cloudflare/prefix_hit_v6` | 11.7 ns | 11.6 – 11.8 ns |
-| `cloudflare/prefix_json_parse` | 19.6 µs | 19.5 – 19.8 µs |
-| `cloudflare/seed_parse_small` | 1.02 µs | 0.99 – 1.06 µs |
-| `cloudflare/seed_parse_1000` | 76.2 µs | 75.1 – 77.5 µs |
-| `cloudflare/sample_round_32` | 431.3 µs | 425.8 – 438.4 µs |
+| `cloudflare/prefix_hit_v4` | 4.74 ns | 4.74 – 4.74 ns |
+| `cloudflare/prefix_miss_v4` | 12.3 ns | 11.9 – 12.7 ns |
+| `cloudflare/prefix_hit_v6` | 9.81 ns | 9.81 – 9.82 ns |
+| `cloudflare/prefix_json_parse` | 17.2 µs | 17.2 – 17.2 µs |
+| `cloudflare/seed_parse_small` | 821.6 ns | 821.2 – 821.9 ns |
+| `cloudflare/seed_parse_1000` | 69.1 µs | 69.1 – 69.1 µs |
+| `cloudflare/sample_round_32` | 369.1 µs | 368.9 – 369.2 µs |
 
 ### Utility and storage
 
 | Benchmark | Mean | 95% CI |
 | --- | --- | --- |
-| `util/ipclass_private` | 69.9 ns | 66.8 – 73.3 ns |
-| `util/ipclass_global` | 504.5 ns | 501.1 – 508.3 ns |
-| `storage/enqueue_500_rows` | 61.7 µs | 60.7 – 62.8 µs |
+| `util/ipclass_private` | 58.3 ns | 58.1 – 58.4 ns |
+| `util/ipclass_global` | 452.1 ns | 451.7 – 452.5 ns |
+| `storage/enqueue_500_rows` | 50.5 µs | 50.4 – 50.6 µs |
 
 ## Reading the microbenchmarks
 
-`path/cache_hit_full` at **2.26 µs** is the entire in-process cost of answering a cached
-query. The load tests show p50 of **0.49 ms** for the same query through a real socket — so
-the daemon's own work is roughly **0.5% of the latency a client observes**, and the other
-99.5% is the kernel, the socket and the loopback path. On a LAN, network transit dominates
+`path/cache_hit_full` at **1.66 µs** is the entire in-process cost of answering a cached
+query. The load tests show p50 of **1.63 ms** for the same query through a real socket — so
+the daemon's own work is roughly **0.1% of the latency a client observes**, and the other
+99.9% is the kernel, the socket and the loopback path. On a LAN, network transit dominates
 further still. That ratio is the design target: the resolver should disappear into the
 network's noise floor.
 
 Two structural properties worth pointing out:
 
-* **Ranking scales linearly.** 8 addresses cost 957 ns and 16 cost 1.77 µs — almost exactly
-  double, with no super-linear term. Real RRsets are 2–8 addresses, at 319–957 ns.
-* **Cloudflare classification is effectively free.** 5.5 ns for IPv4, 11.7 ns for IPv6,
+* **Ranking scales linearly.** 8 addresses cost 774 ns and 16 cost 1.49 µs — almost exactly
+  double, with no super-linear term. Real RRsets are 2–8 addresses, at 228–774 ns.
+* **Cloudflare classification is effectively free.** 4.7 ns for IPv4, 9.8 ns for IPv6,
   because the snapshot precomputes masks and the lookup is a bounded scan over a sorted
   array. That is what makes it acceptable to classify every address in every answer on the
   request path.
 
 Everything expensive is background work and absent from the request path: parsing the
-official prefix API (19.6 µs), a 1000-line seed list (76.2 µs), a sampling round
-(431.3 µs). Even the slowest is half a millisecond; the reason they are off the request
-path is availability, not speed — see [`adr/0004`](adr/0004-foreground-background-split.md).
+official prefix API (17.2 µs), a 1000-line seed list (69.1 µs), a sampling round
+(369.1 µs). Even the slowest is under half a millisecond; the reason they are off the
+request path is availability, not speed — see [`adr/0004`](adr/0004-foreground-background-split.md).
 
 ## Performance regression policy
 

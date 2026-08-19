@@ -1,265 +1,7 @@
-   Compiling proc-macro2 v1.0.107
-   Compiling quote v1.0.47
-   Compiling unicode-ident v1.0.24
-   Compiling libc v0.2.189
-   Compiling syn v3.0.3
-   Compiling syn v2.0.119
-   Compiling cfg-if v1.0.4
-   Compiling portable-atomic v1.15.0
-   Compiling critical-section v1.2.0
-   Compiling once_cell v1.21.4
-   Compiling find-msvc-tools v0.1.11
-   Compiling shlex v2.0.1
-   Compiling cc v1.4.3
-   Compiling pin-project-lite v0.2.17
-   Compiling serde_core v1.0.229
-   Compiling synstructure v0.13.2
-   Compiling bitflags v2.13.1
-   Compiling zerofrom-derive v0.1.7
-   Compiling slab v0.4.12
-   Compiling memchr v2.8.3
-   Compiling zerofrom v0.1.8
-   Compiling yoke-derive v0.8.2
-   Compiling stable_deref_trait v1.2.1
-   Compiling smallvec v1.15.2
-   Compiling bytes v1.12.1
-   Compiling yoke v0.8.3
-   Compiling crossbeam-utils v0.8.22
-   Compiling serde v1.0.229
-   Compiling log v0.4.33
-   Compiling rand_core v0.10.1
-   Compiling ring v0.17.14
-   Compiling tracing-core v0.1.36
-   Compiling zerovec-derive v0.11.5
-   Compiling serde_derive v1.0.229
-   Compiling autocfg v1.5.1
-   Compiling itoa v1.0.18
-   Compiling futures-core v0.3.34
-   Compiling getrandom v0.4.3
-   Compiling zerovec v0.11.7
-   Compiling displaydoc v0.2.7
-   Compiling errno v0.3.14
-   Compiling socket2 v0.6.5
-   Compiling futures-io v0.3.34
-   Compiling foldhash v0.2.0
-   Compiling futures-sink v0.3.34
-   Compiling zeroize v1.9.0
-   Compiling rustls-pki-types v1.15.1
-   Compiling futures-channel v0.3.34
-   Compiling signal-hook-registry v1.4.8
-   Compiling tracing-attributes v0.1.31
-   Compiling tokio-macros v2.7.2
-   Compiling futures-macro v0.3.34
-   Compiling mio v1.2.2
-   Compiling zerocopy v0.8.56
-   Compiling cfg_aliases v0.2.2
-   Compiling futures-task v0.3.34
-   Compiling tokio v1.53.1
-   Compiling futures-util v0.3.34
-   Compiling tracing v0.1.44
-   Compiling zerocopy-derive v0.8.56
-   Compiling getrandom v0.2.17
-   Compiling untrusted v0.9.0
-   Compiling equivalent v1.0.2
-   Compiling tinystr v0.8.4
-   Compiling writeable v0.6.4
-   Compiling thiserror v2.0.20
-   Compiling litemap v0.8.3
-   Compiling getrandom v0.3.4
-   Compiling icu_locale_core v2.3.0
-   Compiling hashbrown v0.17.1
-   Compiling zerotrie v0.2.5
-   Compiling potential_utf v0.1.6
-   Compiling http v1.5.0
-   Compiling num-traits v0.2.19
-   Compiling thiserror-impl v2.0.20
-   Compiling icu_normalizer_data v2.3.0
-   Compiling crossbeam-epoch v0.9.20
-   Compiling utf8_iter v1.0.4
-   Compiling icu_properties_data v2.3.0
-   Compiling icu_collections v2.3.0
-   Compiling icu_provider v2.3.0
-   Compiling rustix v1.1.4
-   Compiling either v1.17.0
-   Compiling cpufeatures v0.3.0
-   Compiling rustls v0.23.43
-   Compiling chacha20 v0.10.1
-   Compiling rand_core v0.9.5
-   Compiling rustls-webpki v0.103.14
-   Compiling fastrand v2.5.0
-   Compiling parking_lot_core v0.9.12
-   Compiling tinyvec_macros v0.1.1
-   Compiling subtle v2.6.1
-   Compiling fnv v1.0.7
-   Compiling scopeguard v1.2.0
-   Compiling linux-raw-sys v0.12.1
-   Compiling lock_api v0.4.14
-   Compiling tinyvec v1.12.0
-   Compiling icu_properties v2.3.0
-   Compiling icu_normalizer v2.3.0
-   Compiling rand v0.10.2
-   Compiling indexmap v2.14.0
-   Compiling tokio-util v0.7.19
-   Compiling quinn-udp v0.5.15
-   Compiling num-conv v0.2.2
-   Compiling time-core v0.1.9
-   Compiling powerfmt v0.2.0
-   Compiling rustversion v1.0.23
-   Compiling deranged v0.5.8
-   Compiling time v0.3.55
-   Compiling idna_adapter v1.2.2
-   Compiling ppv-lite86 v0.2.21
-   Compiling quinn v0.11.11
-   Compiling rand_pcg v0.10.2
-   Compiling lru-slab v0.1.2
-   Compiling zmij v1.0.23
-   Compiling percent-encoding v2.3.2
-   Compiling rustc-hash v2.1.3
-   Compiling regex-syntax v0.8.11
-   Compiling atomic-waker v1.1.2
-   Compiling h2 v0.4.16
-   Compiling quinn-proto v0.11.17
-   Compiling form_urlencoded v1.2.2
-   Compiling rand_chacha v0.9.0
-   Compiling parking_lot v0.12.5
-   Compiling idna v1.1.0
-   Compiling futures-executor v0.3.34
-   Compiling ipnet v2.12.1
-   Compiling utf8parse v0.2.2
-   Compiling serde_json v1.0.151
-   Compiling anstyle-parse v1.0.0
-   Compiling prefix-trie v0.8.4
-   Compiling futures v0.3.34
-   Compiling url v2.5.8
-   Compiling rand v0.9.5
-   Compiling regex-automata v0.4.18
-   Compiling h3 v0.0.8
-   Compiling raw-cpuid v11.6.0
-   Compiling data-encoding v2.11.1
-   Compiling allocator-api2 v0.2.21
-   Compiling anstyle-query v1.1.5
-   Compiling linked-hash-map v0.5.6
-   Compiling colorchoice v1.0.5
-   Compiling pkg-config v0.3.34
-   Compiling is_terminal_polyfill v1.70.2
-   Compiling vcpkg v0.2.15
-   Compiling anstyle v1.0.14
-   Compiling httparse v1.10.1
-   Compiling anstream v1.0.0
-   Compiling libsqlite3-sys v0.38.2
-   Compiling lru-cache v0.1.2
-   Compiling hashbrown v0.16.1
-   Compiling hickory-proto v0.26.1
-   Compiling quanta v0.12.6
-   Compiling h3-quinn v0.0.10
-   Compiling rapidhash v4.5.1
-   Compiling tokio-rustls v0.26.4
-   Compiling terminal_size v0.4.4
-   Compiling http-body v1.1.0
-   Compiling memoffset v0.9.1
-   Compiling async-trait v0.1.92
-   Compiling try-lock v0.2.5
-   Compiling strsim v0.11.1
-   Compiling heck v0.5.0
-   Compiling base64 v0.22.1
-   Compiling clap_lex v1.1.0
-   Compiling clap_builder v4.6.6
-   Compiling clap_derive v4.6.4
-   Compiling hickory-net v0.26.1
-   Compiling want v0.3.1
-   Compiling metrics v0.24.6
-   Compiling rand_xoshiro v0.7.0
-   Compiling nix v0.31.3
-   Compiling uuid v1.24.1
-   Compiling crossbeam-channel v0.5.16
-   Compiling left-right v0.11.8
-   Compiling lazy_static v1.5.0
-   Compiling metrics-exporter-prometheus v0.18.3
-   Compiling anyhow v1.0.104
-   Compiling sketches-ddsketch v0.3.1
-   Compiling crossbeam-deque v0.8.7
-   Compiling hashbag v0.1.13
-   Compiling httpdate v1.0.3
-   Compiling tagptr v0.2.0
-   Compiling winnow v1.0.4
-   Compiling toml_parser v1.1.3+spec-1.1.0
-   Compiling moka v0.12.16
-   Compiling hyper v1.11.0
-   Compiling evmap v11.0.0
-   Compiling metrics-util v0.20.4
-   Compiling sharded-slab v0.1.7
-   Compiling clap v4.6.6
-   Compiling matchers v0.2.0
-   Compiling spinning_top v0.3.0
-   Compiling hashlink v0.12.1
-   Compiling tracing-serde v0.2.0
-   Compiling tracing-log v0.2.0
-   Compiling serde_spanned v1.1.1
-   Compiling toml_datetime v1.1.1+spec-1.1.0
-   Compiling thread_local v1.1.10
-   Compiling fallible-iterator v0.3.0
-   Compiling ipnetwork v0.21.1
-   Compiling openssl-probe v0.2.1
-   Compiling egressdns v1.0.0 (<source-tree>)
-   Compiling nu-ansi-term v0.50.3
-   Compiling web-time v1.1.0
-   Compiling nonzero_ext v0.3.0
-   Compiling toml_writer v1.1.2+spec-1.1.0
-   Compiling rayon-core v1.13.0
-   Compiling fallible-streaming-iterator v0.1.9
-   Compiling futures-timer v3.0.4
-   Compiling humantime v2.4.0
-   Compiling humantime-serde v1.1.1
-   Compiling governor v0.10.4
-   Compiling toml v1.1.4+spec-1.1.0
-   Compiling tracing-subscriber v0.3.23
-   Compiling rustls-native-certs v0.8.4
-   Compiling maxminddb v0.30.0
-   Compiling hyper-util v0.1.20
-   Compiling hickory-resolver v0.26.1
-   Compiling http-body-util v0.1.5
-   Compiling arc-swap v1.9.2
-   Compiling half v2.7.1
-   Compiling webpki-roots v1.0.9
-   Compiling alloca v0.4.0
-   Compiling sd-notify v0.5.0
-   Compiling ciborium-io v0.2.2
-   Compiling plotters-backend v0.3.7
-   Compiling hex v0.4.3
-   Compiling plotters-svg v0.3.7
-   Compiling ciborium-ll v0.2.2
-   Compiling tempfile v3.27.0
-   Compiling itertools v0.13.0
-   Compiling wait-timeout v0.2.1
-   Compiling same-file v1.0.6
-   Compiling cast v0.3.0
-   Compiling quick-error v1.2.3
-   Compiling bit-vec v0.8.0
-   Compiling bit-set v0.8.0
-   Compiling rusty-fork v0.3.1
-   Compiling criterion-plot v0.8.2
-   Compiling walkdir v2.5.0
-   Compiling rayon v1.12.0
-   Compiling ciborium v0.2.2
-   Compiling plotters v0.3.7
-   Compiling pem v3.0.6
-   Compiling tinytemplate v1.2.1
-   Compiling regex v1.13.1
-   Compiling yasna v0.6.0
-   Compiling rand_xorshift v0.4.0
-   Compiling page_size v0.6.0
-   Compiling unarray v0.1.4
-   Compiling anes v0.1.6
-   Compiling oorandom v11.1.5
-   Compiling criterion v0.8.2
-   Compiling rusqlite v0.40.2
-   Compiling proptest v1.11.0
-   Compiling rcgen v0.14.9
-   Compiling hickory-server v0.26.1
-    Finished `bench` profile [optimized + debuginfo] target(s) in 15m 43s
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.16s
      Running unittests src/lib.rs (target/release/deps/egressdns-ddd76f40e125240c)
 
-running 327 tests
+running 332 tests
 test admin::client::tests::connecting_to_a_missing_socket_fails_cleanly ... ignored
 test admin::server::tests::check_config_and_reload_work ... ignored
 test admin::server::tests::cloudflare_reports_disabled_by_default ... ignored
@@ -336,13 +78,18 @@ test cloudflare::seeds::tests::parses_live_captured_fixtures ... ignored
 test cloudflare::state::tests::a_failure_resets_the_streak_but_keeps_the_record ... ignored
 test cloudflare::state::tests::a_runtime_override_can_never_strengthen_the_configured_mode ... ignored
 test cloudflare::state::tests::a_runtime_override_may_only_weaken_the_configured_mode ... ignored
+test cloudflare::state::tests::an_override_set_after_a_reload_is_bounded_by_the_new_configured_mode ... ignored
 test cloudflare::state::tests::builtin_prefixes_are_available_immediately ... ignored
 test cloudflare::state::tests::generation_change_clears_derived_state ... ignored
 test cloudflare::state::tests::prefix_replacement_drops_stale_candidates ... ignored
+test cloudflare::state::tests::reconfigure_applies_enabled_and_mode_without_a_restart ... ignored
+test cloudflare::state::tests::reconfigure_clears_an_override_that_the_new_mode_makes_too_strong ... ignored
+test cloudflare::state::tests::reconfigure_keeps_an_override_that_still_weakens_the_new_mode ... ignored
 test cloudflare::state::tests::source_status_is_bounded_and_sorted ... ignored
 test cloudflare::state::tests::validations_accumulate_and_expire ... ignored
 test cloudflare::state::tests::verified_candidates_are_filtered_and_sorted ... ignored
 test config::reload::tests::an_unchanged_configuration_needs_no_restart ... ignored
+test config::reload::tests::every_config_path_is_classified_exactly_once ... ignored
 test config::reload::tests::every_restart_required_field_is_detected_individually ... ignored
 test config::reload::tests::listener_changes_require_a_restart ... ignored
 test config::reload::tests::reloadable_fields_do_not_require_a_restart ... ignored
@@ -588,7 +335,7 @@ test util::tests::hex_round_trip ... ignored
 test util::tests::sha256_known_vector ... ignored
 test util::time::tests::test_clock_advances ... ignored
 
-test result: ok. 0 passed; 0 failed; 327 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 332 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running unittests src/bin/egressdnsctl.rs (target/release/deps/egressdnsctl-0a52438972f2b20c)
 
@@ -606,306 +353,368 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 Gnuplot not found, using plotters backend
 Benchmarking cloudflare/prefix_hit_v4
 Benchmarking cloudflare/prefix_hit_v4: Warming up for 500.00 ms
-Benchmarking cloudflare/prefix_hit_v4: Collecting 50 samples in estimated 2.0000 s (365M iterations)
+Benchmarking cloudflare/prefix_hit_v4: Collecting 50 samples in estimated 2.0000 s (422M iterations)
 Benchmarking cloudflare/prefix_hit_v4: Analyzing
 cloudflare/prefix_hit_v4
-                        time:   [5.3024 ns 5.4993 ns 5.7657 ns]
-Found 6 outliers among 50 measurements (12.00%)
-  1 (2.00%) high mild
-  5 (10.00%) high severe
+                        time:   [4.7383 ns 4.7406 ns 4.7433 ns]
+                        change: [−0.7326% −0.2380% +0.0614%] (p = 0.35 > 0.05)
+                        No change in performance detected.
+Found 9 outliers among 50 measurements (18.00%)
+  7 (14.00%) high mild
+  2 (4.00%) high severe
 
 Benchmarking cloudflare/prefix_miss_v4
 Benchmarking cloudflare/prefix_miss_v4: Warming up for 500.00 ms
-Benchmarking cloudflare/prefix_miss_v4: Collecting 50 samples in estimated 2.0000 s (150M iterations)
+Benchmarking cloudflare/prefix_miss_v4: Collecting 50 samples in estimated 2.0000 s (159M iterations)
 Benchmarking cloudflare/prefix_miss_v4: Analyzing
 cloudflare/prefix_miss_v4
-                        time:   [13.480 ns 13.708 ns 13.992 ns]
-Found 5 outliers among 50 measurements (10.00%)
-  1 (2.00%) high mild
-  4 (8.00%) high severe
+                        time:   [11.905 ns 12.254 ns 12.731 ns]
+                        change: [−17.746% −12.870% −7.4317%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 50 measurements (18.00%)
+  9 (18.00%) high severe
 
 Benchmarking cloudflare/prefix_hit_v6
 Benchmarking cloudflare/prefix_hit_v6: Warming up for 500.00 ms
-Benchmarking cloudflare/prefix_hit_v6: Collecting 50 samples in estimated 2.0000 s (170M iterations)
+Benchmarking cloudflare/prefix_hit_v6: Collecting 50 samples in estimated 2.0000 s (204M iterations)
 Benchmarking cloudflare/prefix_hit_v6: Analyzing
 cloudflare/prefix_hit_v6
-                        time:   [11.637 ns 11.734 ns 11.849 ns]
-Found 10 outliers among 50 measurements (20.00%)
-  4 (8.00%) low mild
-  2 (4.00%) high mild
-  4 (8.00%) high severe
+                        time:   [9.8094 ns 9.8131 ns 9.8173 ns]
+                        change: [−5.8697% −4.1435% −2.5943%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 50 measurements (8.00%)
+  3 (6.00%) high mild
+  1 (2.00%) high severe
 
 Benchmarking ranking/order/2_addresses
 Benchmarking ranking/order/2_addresses: Warming up for 500.00 ms
-Benchmarking ranking/order/2_addresses: Collecting 50 samples in estimated 2.0001 s (6.3M iterations)
+Benchmarking ranking/order/2_addresses: Collecting 50 samples in estimated 2.0002 s (8.8M iterations)
 Benchmarking ranking/order/2_addresses: Analyzing
 ranking/order/2_addresses
-                        time:   [315.86 ns 319.22 ns 322.66 ns]
-                        thrpt:  [6.1985 Melem/s 6.2653 Melem/s 6.3319 Melem/s]
-Found 1 outliers among 50 measurements (2.00%)
+                        time:   [227.96 ns 228.00 ns 228.05 ns]
+                        thrpt:  [8.7700 Melem/s 8.7719 Melem/s 8.7736 Melem/s]
+                 change:
+                        time:   [−1.1354% −0.9301% −0.7349%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.7403% +0.9389% +1.1485%]
+                        Change within noise threshold.
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) low mild
   1 (2.00%) high mild
 Benchmarking ranking/order/4_addresses
 Benchmarking ranking/order/4_addresses: Warming up for 500.00 ms
-Benchmarking ranking/order/4_addresses: Collecting 50 samples in estimated 2.0005 s (3.5M iterations)
+Benchmarking ranking/order/4_addresses: Collecting 50 samples in estimated 2.0004 s (4.9M iterations)
 Benchmarking ranking/order/4_addresses: Analyzing
 ranking/order/4_addresses
-                        time:   [574.85 ns 581.03 ns 588.52 ns]
-                        thrpt:  [6.7967 Melem/s 6.8843 Melem/s 6.9583 Melem/s]
-Found 8 outliers among 50 measurements (16.00%)
-  2 (4.00%) low mild
-  2 (4.00%) high mild
-  4 (8.00%) high severe
+                        time:   [410.36 ns 410.46 ns 410.56 ns]
+                        thrpt:  [9.7428 Melem/s 9.7451 Melem/s 9.7475 Melem/s]
+                 change:
+                        time:   [−1.3335% −1.1805% −1.0199%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0305% +1.1946% +1.3515%]
+                        Performance has improved.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) low mild
 Benchmarking ranking/order/8_addresses
 Benchmarking ranking/order/8_addresses: Warming up for 500.00 ms
-Benchmarking ranking/order/8_addresses: Collecting 50 samples in estimated 2.0000 s (2.1M iterations)
+Benchmarking ranking/order/8_addresses: Collecting 50 samples in estimated 2.0002 s (2.6M iterations)
 Benchmarking ranking/order/8_addresses: Analyzing
 ranking/order/8_addresses
-                        time:   [944.16 ns 957.18 ns 972.47 ns]
-                        thrpt:  [8.2265 Melem/s 8.3579 Melem/s 8.4732 Melem/s]
-Found 4 outliers among 50 measurements (8.00%)
-  3 (6.00%) high mild
-  1 (2.00%) high severe
+                        time:   [773.89 ns 774.18 ns 774.57 ns]
+                        thrpt:  [10.328 Melem/s 10.334 Melem/s 10.337 Melem/s]
+                 change:
+                        time:   [+0.6379% +0.7500% +0.8852%] (p = 0.00 < 0.05)
+                        thrpt:  [−0.8775% −0.7444% −0.6338%]
+                        Change within noise threshold.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high mild
 Benchmarking ranking/order/16_addresses
 Benchmarking ranking/order/16_addresses: Warming up for 500.00 ms
-Benchmarking ranking/order/16_addresses: Collecting 50 samples in estimated 2.0016 s (1.1M iterations)
+Benchmarking ranking/order/16_addresses: Collecting 50 samples in estimated 2.0009 s (1.3M iterations)
 Benchmarking ranking/order/16_addresses: Analyzing
 ranking/order/16_addresses
-                        time:   [1.7365 µs 1.7747 µs 1.8179 µs]
-                        thrpt:  [8.8015 Melem/s 9.0156 Melem/s 9.2141 Melem/s]
-Found 6 outliers among 50 measurements (12.00%)
-  2 (4.00%) high mild
-  4 (8.00%) high severe
+                        time:   [1.4922 µs 1.4930 µs 1.4938 µs]
+                        thrpt:  [10.711 Melem/s 10.717 Melem/s 10.723 Melem/s]
+                 change:
+                        time:   [−1.8600% −0.9944% −0.3372%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.3384% +1.0043% +1.8953%]
+                        Change within noise threshold.
 
 Benchmarking ranking/expected_cost
 Benchmarking ranking/expected_cost: Warming up for 500.00 ms
-Benchmarking ranking/expected_cost: Collecting 50 samples in estimated 2.0000 s (28M iterations)
+Benchmarking ranking/expected_cost: Collecting 50 samples in estimated 2.0000 s (36M iterations)
 Benchmarking ranking/expected_cost: Analyzing
-ranking/expected_cost   time:   [66.959 ns 67.651 ns 68.367 ns]
+ranking/expected_cost   time:   [55.873 ns 55.906 ns 55.937 ns]
+                        change: [−0.5036% −0.2335% −0.0029%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 50 measurements (8.00%)
+  4 (8.00%) high mild
 
 Benchmarking ranking/record_observation
 Benchmarking ranking/record_observation: Warming up for 500.00 ms
-Benchmarking ranking/record_observation: Collecting 50 samples in estimated 2.0000 s (110M iterations)
+Benchmarking ranking/record_observation: Collecting 50 samples in estimated 2.0000 s (120M iterations)
 Benchmarking ranking/record_observation: Analyzing
 ranking/record_observation
-                        time:   [18.829 ns 19.441 ns 20.054 ns]
-Found 3 outliers among 50 measurements (6.00%)
-  2 (4.00%) high mild
-  1 (2.00%) high severe
+                        time:   [16.554 ns 16.577 ns 16.608 ns]
+                        change: [−0.1447% +0.0441% +0.2114%] (p = 0.63 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) low mild
 
 Benchmarking cloudflare/seed_parse_small
 Benchmarking cloudflare/seed_parse_small: Warming up for 500.00 ms
-Benchmarking cloudflare/seed_parse_small: Collecting 50 samples in estimated 2.0004 s (2.1M iterations)
+Benchmarking cloudflare/seed_parse_small: Collecting 50 samples in estimated 2.0009 s (2.4M iterations)
 Benchmarking cloudflare/seed_parse_small: Analyzing
 cloudflare/seed_parse_small
-                        time:   [986.16 ns 1.0207 µs 1.0604 µs]
-Found 5 outliers among 50 measurements (10.00%)
-  2 (4.00%) high mild
-  3 (6.00%) high severe
+                        time:   [821.23 ns 821.57 ns 821.93 ns]
+                        change: [−0.1014% −0.0292% +0.0468%] (p = 0.47 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) low mild
+  1 (2.00%) high mild
+  1 (2.00%) high severe
 
 Benchmarking cloudflare/seed_parse_1000
 Benchmarking cloudflare/seed_parse_1000: Warming up for 500.00 ms
-Benchmarking cloudflare/seed_parse_1000: Collecting 50 samples in estimated 2.0910 s (27k iterations)
+Benchmarking cloudflare/seed_parse_1000: Collecting 50 samples in estimated 2.0286 s (29k iterations)
 Benchmarking cloudflare/seed_parse_1000: Analyzing
 cloudflare/seed_parse_1000
-                        time:   [75.147 µs 76.204 µs 77.546 µs]
-Found 3 outliers among 50 measurements (6.00%)
+                        time:   [69.059 µs 69.081 µs 69.114 µs]
+                        change: [+0.1861% +0.2409% +0.2974%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 50 measurements (2.00%)
   1 (2.00%) high mild
-  2 (4.00%) high severe
 
 Benchmarking cloudflare/prefix_json_parse
 Benchmarking cloudflare/prefix_json_parse: Warming up for 500.00 ms
-Benchmarking cloudflare/prefix_json_parse: Collecting 50 samples in estimated 2.0186 s (101k iterations)
+Benchmarking cloudflare/prefix_json_parse: Collecting 50 samples in estimated 2.0053 s (116k iterations)
 Benchmarking cloudflare/prefix_json_parse: Analyzing
 cloudflare/prefix_json_parse
-                        time:   [19.498 µs 19.641 µs 19.798 µs]
-Found 2 outliers among 50 measurements (4.00%)
-  2 (4.00%) high mild
+                        time:   [17.207 µs 17.213 µs 17.217 µs]
+                        change: [−0.3166% −0.2810% −0.2367%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
 
 Benchmarking cloudflare/sample_round_32
 Benchmarking cloudflare/sample_round_32: Warming up for 500.00 ms
-Benchmarking cloudflare/sample_round_32: Collecting 50 samples in estimated 2.1471 s (5100 iterations)
+Benchmarking cloudflare/sample_round_32: Collecting 50 samples in estimated 2.3420 s (6375 iterations)
 Benchmarking cloudflare/sample_round_32: Analyzing
 cloudflare/sample_round_32
-                        time:   [425.84 µs 431.26 µs 438.37 µs]
+                        time:   [368.86 µs 369.05 µs 369.24 µs]
+                        change: [−0.6272% −0.0477% +0.4053%] (p = 0.86 > 0.05)
+                        No change in performance detected.
 Found 4 outliers among 50 measurements (8.00%)
+  2 (4.00%) low mild
   2 (4.00%) high mild
-  2 (4.00%) high severe
 
 Benchmarking util/ipclass_global
 Benchmarking util/ipclass_global: Warming up for 500.00 ms
-Benchmarking util/ipclass_global: Collecting 50 samples in estimated 2.0001 s (4.0M iterations)
+Benchmarking util/ipclass_global: Collecting 50 samples in estimated 2.0005 s (4.4M iterations)
 Benchmarking util/ipclass_global: Analyzing
-util/ipclass_global     time:   [501.08 ns 504.53 ns 508.28 ns]
-Found 7 outliers among 50 measurements (14.00%)
-  4 (8.00%) high mild
-  3 (6.00%) high severe
+util/ipclass_global     time:   [451.70 ns 452.10 ns 452.54 ns]
+                        change: [−0.2119% +0.0035% +0.2598%] (p = 0.97 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 50 measurements (4.00%)
+  2 (4.00%) high severe
 
 Benchmarking util/ipclass_private
 Benchmarking util/ipclass_private: Warming up for 500.00 ms
-Benchmarking util/ipclass_private: Collecting 50 samples in estimated 2.0001 s (27M iterations)
+Benchmarking util/ipclass_private: Collecting 50 samples in estimated 2.0000 s (34M iterations)
 Benchmarking util/ipclass_private: Analyzing
-util/ipclass_private    time:   [66.808 ns 69.921 ns 73.257 ns]
-Found 7 outliers among 50 measurements (14.00%)
-  3 (6.00%) high mild
-  4 (8.00%) high severe
+util/ipclass_private    time:   [58.126 ns 58.285 ns 58.449 ns]
+                        change: [+0.3776% +0.6644% +0.9679%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high mild
 
 Benchmarking storage/enqueue_500_rows
 Benchmarking storage/enqueue_500_rows: Warming up for 500.00 ms
-Benchmarking storage/enqueue_500_rows: Collecting 50 samples in estimated 2.0092 s (31k iterations)
+Benchmarking storage/enqueue_500_rows: Collecting 50 samples in estimated 2.0406 s (40k iterations)
 Benchmarking storage/enqueue_500_rows: Analyzing
 storage/enqueue_500_rows
-                        time:   [60.673 µs 61.675 µs 62.772 µs]
+                        time:   [50.406 µs 50.473 µs 50.569 µs]
+                        change: [−0.4092% −0.3035% −0.1914%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
 Found 3 outliers among 50 measurements (6.00%)
-  3 (6.00%) high severe
+  2 (4.00%) high mild
+  1 (2.00%) high severe
 
      Running benches/hot_path.rs (target/release/deps/hot_path-89d54b4e0152e4e2)
 Gnuplot not found, using plotters backend
 Benchmarking message/parse/1_records
 Benchmarking message/parse/1_records: Warming up for 500.00 ms
-Benchmarking message/parse/1_records: Collecting 50 samples in estimated 2.0002 s (3.6M iterations)
+Benchmarking message/parse/1_records: Collecting 50 samples in estimated 2.0001 s (5.2M iterations)
 Benchmarking message/parse/1_records: Analyzing
-message/parse/1_records time:   [474.30 ns 482.20 ns 490.34 ns]
-                        thrpt:  [116.69 MiB/s 118.67 MiB/s 120.64 MiB/s]
-Found 1 outliers among 50 measurements (2.00%)
-  1 (2.00%) high severe
+message/parse/1_records time:   [380.20 ns 380.71 ns 381.40 ns]
+                        thrpt:  [150.03 MiB/s 150.30 MiB/s 150.50 MiB/s]
+                 change:
+                        time:   [−2.4821% −2.1369% −1.8048%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.8379% +2.1835% +2.5453%]
+                        Performance has improved.
 Benchmarking message/parse/4_records
 Benchmarking message/parse/4_records: Warming up for 500.00 ms
-Benchmarking message/parse/4_records: Collecting 50 samples in estimated 2.0011 s (1.9M iterations)
+Benchmarking message/parse/4_records: Collecting 50 samples in estimated 2.0005 s (2.4M iterations)
 Benchmarking message/parse/4_records: Analyzing
-message/parse/4_records time:   [1.0370 µs 1.0591 µs 1.0850 µs]
-                        thrpt:  [94.926 MiB/s 97.249 MiB/s 99.323 MiB/s]
-Found 5 outliers among 50 measurements (10.00%)
-  3 (6.00%) high mild
-  2 (4.00%) high severe
+message/parse/4_records time:   [822.73 ns 824.32 ns 826.38 ns]
+                        thrpt:  [124.64 MiB/s 124.95 MiB/s 125.19 MiB/s]
+                 change:
+                        time:   [−2.4571% −2.1130% −1.7663%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.7980% +2.1586% +2.5190%]
+                        Performance has improved.
 Benchmarking message/parse/16_records
 Benchmarking message/parse/16_records: Warming up for 500.00 ms
-Benchmarking message/parse/16_records: Collecting 50 samples in estimated 2.0005 s (594k iterations)
+Benchmarking message/parse/16_records: Collecting 50 samples in estimated 2.0004 s (844k iterations)
 Benchmarking message/parse/16_records: Analyzing
 message/parse/16_records
-                        time:   [2.9945 µs 3.0272 µs 3.0621 µs]
-                        thrpt:  [93.433 MiB/s 94.511 MiB/s 95.543 MiB/s]
-Found 2 outliers among 50 measurements (4.00%)
-  2 (4.00%) high mild
+                        time:   [2.3514 µs 2.3593 µs 2.3712 µs]
+                        thrpt:  [120.66 MiB/s 121.26 MiB/s 121.67 MiB/s]
+                 change:
+                        time:   [−3.2066% −2.7325% −2.2148%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.2650% +2.8093% +3.3129%]
+                        Performance has improved.
 
 Benchmarking message/serialize/1_records
 Benchmarking message/serialize/1_records: Warming up for 500.00 ms
-Benchmarking message/serialize/1_records: Collecting 50 samples in estimated 2.0005 s (2.7M iterations)
+Benchmarking message/serialize/1_records: Collecting 50 samples in estimated 2.0007 s (3.3M iterations)
 Benchmarking message/serialize/1_records: Analyzing
 message/serialize/1_records
-                        time:   [738.25 ns 752.32 ns 771.74 ns]
-Found 3 outliers among 50 measurements (6.00%)
-  2 (4.00%) high mild
-  1 (2.00%) high severe
+                        time:   [609.61 ns 609.81 ns 610.07 ns]
+                        change: [−1.3128% −1.2573% −1.2011%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
 Benchmarking message/serialize/4_records
 Benchmarking message/serialize/4_records: Warming up for 500.00 ms
-Benchmarking message/serialize/4_records: Collecting 50 samples in estimated 2.0004 s (1.5M iterations)
+Benchmarking message/serialize/4_records: Collecting 50 samples in estimated 2.0010 s (1.7M iterations)
 Benchmarking message/serialize/4_records: Analyzing
 message/serialize/4_records
-                        time:   [1.2800 µs 1.3235 µs 1.3782 µs]
-Found 5 outliers among 50 measurements (10.00%)
+                        time:   [1.1429 µs 1.1431 µs 1.1433 µs]
+                        change: [+2.2100% +2.2422% +2.2736%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 50 measurements (4.00%)
   2 (4.00%) high mild
-  3 (6.00%) high severe
 Benchmarking message/serialize/16_records
 Benchmarking message/serialize/16_records: Warming up for 500.00 ms
-Benchmarking message/serialize/16_records: Collecting 50 samples in estimated 2.0001 s (592k iterations)
+Benchmarking message/serialize/16_records: Collecting 50 samples in estimated 2.0003 s (636k iterations)
 Benchmarking message/serialize/16_records: Analyzing
 message/serialize/16_records
-                        time:   [3.2536 µs 3.2832 µs 3.3235 µs]
+                        time:   [3.1231 µs 3.1244 µs 3.1266 µs]
+                        change: [+0.8826% +0.9297% +0.9766%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
 Found 3 outliers among 50 measurements (6.00%)
-  2 (4.00%) high mild
-  1 (2.00%) high severe
+  1 (2.00%) high mild
+  2 (4.00%) high severe
 
 Benchmarking message/ttl_rewrite
 Benchmarking message/ttl_rewrite: Warming up for 500.00 ms
-Benchmarking message/ttl_rewrite: Collecting 50 samples in estimated 2.0006 s (745k iterations)
+Benchmarking message/ttl_rewrite: Collecting 50 samples in estimated 2.0010 s (1.2M iterations)
 Benchmarking message/ttl_rewrite: Analyzing
-message/ttl_rewrite     time:   [287.74 ns 319.55 ns 348.22 ns]
-Found 1 outliers among 50 measurements (2.00%)
-  1 (2.00%) high mild
+message/ttl_rewrite     time:   [235.85 ns 257.55 ns 274.32 ns]
+                        change: [−11.391% −0.3908% +11.925%] (p = 0.95 > 0.05)
+                        No change in performance detected.
 
 Benchmarking message/fingerprint
 Benchmarking message/fingerprint: Warming up for 500.00 ms
-Benchmarking message/fingerprint: Collecting 50 samples in estimated 2.0047 s (536k iterations)
+Benchmarking message/fingerprint: Collecting 50 samples in estimated 2.0030 s (595k iterations)
 Benchmarking message/fingerprint: Analyzing
-message/fingerprint     time:   [3.7598 µs 3.7860 µs 3.8124 µs]
+message/fingerprint     time:   [3.3675 µs 3.3683 µs 3.3692 µs]
+                        change: [−0.7479% −0.7080% −0.6661%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) high mild
+  2 (4.00%) high severe
 
 Benchmarking cache/hit
 Benchmarking cache/hit: Warming up for 500.00 ms
-Benchmarking cache/hit: Collecting 50 samples in estimated 2.0000 s (9.2M iterations)
+Benchmarking cache/hit: Collecting 50 samples in estimated 2.0002 s (10M iterations)
 Benchmarking cache/hit: Analyzing
-cache/hit               time:   [213.12 ns 215.59 ns 218.51 ns]
-Found 8 outliers among 50 measurements (16.00%)
-  3 (6.00%) high mild
-  5 (10.00%) high severe
+cache/hit               time:   [189.58 ns 189.99 ns 190.29 ns]
+                        change: [+0.8482% +1.0149% +1.2062%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
 
 Benchmarking cache/miss
 Benchmarking cache/miss: Warming up for 500.00 ms
-Benchmarking cache/miss: Collecting 50 samples in estimated 2.0002 s (12M iterations)
+Benchmarking cache/miss: Collecting 50 samples in estimated 2.0001 s (13M iterations)
 Benchmarking cache/miss: Analyzing
-cache/miss              time:   [172.11 ns 173.58 ns 175.19 ns]
-Found 2 outliers among 50 measurements (4.00%)
+cache/miss              time:   [152.65 ns 152.66 ns 152.67 ns]
+                        change: [+18.066% +18.093% +18.122%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 50 measurements (10.00%)
+  1 (2.00%) low severe
+  1 (2.00%) low mild
   2 (4.00%) high mild
+  1 (2.00%) high severe
 
 Benchmarking cache/key_construction
 Benchmarking cache/key_construction: Warming up for 500.00 ms
-Benchmarking cache/key_construction: Collecting 50 samples in estimated 2.0001 s (14M iterations)
+Benchmarking cache/key_construction: Collecting 50 samples in estimated 2.0001 s (17M iterations)
 Benchmarking cache/key_construction: Analyzing
-cache/key_construction  time:   [134.44 ns 135.92 ns 138.17 ns]
-Found 5 outliers among 50 measurements (10.00%)
-  2 (4.00%) high mild
-  3 (6.00%) high severe
+cache/key_construction  time:   [117.12 ns 117.16 ns 117.20 ns]
+                        change: [+1.1755% +1.2760% +1.3481%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) low mild
 
 Benchmarking singleflight/uncontended
 Benchmarking singleflight/uncontended: Warming up for 500.00 ms
-Benchmarking singleflight/uncontended: Collecting 50 samples in estimated 2.0002 s (3.8M iterations)
+Benchmarking singleflight/uncontended: Collecting 50 samples in estimated 2.0005 s (4.4M iterations)
 Benchmarking singleflight/uncontended: Analyzing
 singleflight/uncontended
-                        time:   [519.32 ns 528.20 ns 538.67 ns]
+                        time:   [450.54 ns 450.60 ns 450.68 ns]
+                        change: [−0.8614% −0.7808% −0.7011%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
 Found 5 outliers among 50 measurements (10.00%)
   3 (6.00%) high mild
   2 (4.00%) high severe
 
 Benchmarking acl/allow
 Benchmarking acl/allow: Warming up for 500.00 ms
-Benchmarking acl/allow: Collecting 50 samples in estimated 2.0000 s (152M iterations)
+Benchmarking acl/allow: Collecting 50 samples in estimated 2.0000 s (171M iterations)
 Benchmarking acl/allow: Analyzing
-acl/allow               time:   [12.972 ns 13.042 ns 13.119 ns]
-Found 2 outliers among 50 measurements (4.00%)
-  2 (4.00%) high mild
+acl/allow               time:   [11.704 ns 11.705 ns 11.706 ns]
+                        change: [−0.0109% +0.0073% +0.0269%] (p = 0.46 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) low mild
+  2 (4.00%) high severe
 
 Benchmarking acl/deny
 Benchmarking acl/deny: Warming up for 500.00 ms
-Benchmarking acl/deny: Collecting 50 samples in estimated 2.0000 s (101M iterations)
+Benchmarking acl/deny: Collecting 50 samples in estimated 2.0000 s (114M iterations)
 Benchmarking acl/deny: Analyzing
-acl/deny                time:   [19.442 ns 19.529 ns 19.623 ns]
-Found 5 outliers among 50 measurements (10.00%)
-  2 (4.00%) high mild
-  3 (6.00%) high severe
+acl/deny                time:   [17.608 ns 17.715 ns 17.866 ns]
+                        change: [+0.0928% +0.5811% +1.3334%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 11 outliers among 50 measurements (22.00%)
+  1 (2.00%) high mild
+  10 (20.00%) high severe
 
 Benchmarking ratelimit/check
 Benchmarking ratelimit/check: Warming up for 500.00 ms
-Benchmarking ratelimit/check: Collecting 50 samples in estimated 2.0001 s (27M iterations)
+Benchmarking ratelimit/check: Collecting 50 samples in estimated 2.0000 s (33M iterations)
 Benchmarking ratelimit/check: Analyzing
-ratelimit/check         time:   [66.593 ns 67.192 ns 67.949 ns]
-Found 4 outliers among 50 measurements (8.00%)
-  1 (2.00%) high mild
-  3 (6.00%) high severe
+ratelimit/check         time:   [57.089 ns 57.126 ns 57.186 ns]
+                        change: [−0.0436% +0.0112% +0.0674%] (p = 0.69 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) low severe
+  1 (2.00%) high severe
 
 Benchmarking cache/size_estimate
 Benchmarking cache/size_estimate: Warming up for 500.00 ms
-Benchmarking cache/size_estimate: Collecting 50 samples in estimated 2.0011 s (1.1M iterations)
+Benchmarking cache/size_estimate: Collecting 50 samples in estimated 2.0022 s (1.1M iterations)
 Benchmarking cache/size_estimate: Analyzing
-cache/size_estimate     time:   [1.8919 µs 1.9296 µs 1.9676 µs]
-Found 2 outliers among 50 measurements (4.00%)
-  2 (4.00%) high mild
+cache/size_estimate     time:   [1.7608 µs 1.7612 µs 1.7617 µs]
+                        change: [+1.1140% +1.1670% +1.2183%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 8 outliers among 50 measurements (16.00%)
+  8 (16.00%) high mild
 
 Benchmarking path/cache_hit_full
 Benchmarking path/cache_hit_full: Warming up for 500.00 ms
-Benchmarking path/cache_hit_full: Collecting 50 samples in estimated 2.0023 s (904k iterations)
+Benchmarking path/cache_hit_full: Collecting 50 samples in estimated 2.0009 s (1.2M iterations)
 Benchmarking path/cache_hit_full: Analyzing
-path/cache_hit_full     time:   [2.2084 µs 2.2588 µs 2.3190 µs]
-Found 5 outliers among 50 measurements (10.00%)
-  1 (2.00%) high mild
-  4 (8.00%) high severe
+path/cache_hit_full     time:   [1.6556 µs 1.6576 µs 1.6591 µs]
+                        change: [−1.1441% −0.9730% −0.7951%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
 
-EXIT=0
