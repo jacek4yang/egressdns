@@ -103,6 +103,8 @@ Everything not in this table applies on reload.
 | `prefetch.hot_set_size` / `prefetch.transition_table_size` / `prefetch.transition_prediction` | the hot set is sized once at startup |
 | `probe.queue_size` | the probe channel capacity is fixed at construction |
 | `dnssec.max_concurrent_validations` | the validation semaphore is sized once at startup |
+| `cloudflare.candidate_pool_max` | the candidate pool capacity is fixed at construction; resizing would mean discarding validated candidates |
+| `cloudflare.sampling.seed` / `cloudflare.sampling.buckets_per_prefix` / `cloudflare.sampling.exploit_fraction` | the sampler is built once at startup; rebuilding it would discard per-bucket history |
 | `storage.enabled` / `storage.path` / `storage.queue_size` | the database connection and its write queue are opened once at startup |
 | `logging.level` / `logging.json` | the tracing subscriber is installed once at startup |
 
@@ -650,7 +652,7 @@ Process-wide ceilings.
 | --- | --- | --- | --- |
 | `worker_threads` | integer (optional) | unset | Tokio worker threads; `None` means one per available core. |
 | `max_inflight_queries` | integer | `20000` | Maximum concurrent in-flight client queries. |
-| `max_inflight_upstream` | integer | `4000` | Global ceiling on upstream exchanges in flight, across *every* path that issues one — foreground resolution, stale refresh, prefetch and probe-driven lookups alike. The permit is acquired in the scheduler, which is the single point every upstream query passes through. A query that cannot get one inside its budget is shed as SERVFAIL and counted in `upstream_shed_total`. **Restart-required**: the semaphore is sized once at startup. |
+| `max_inflight_upstream` | integer | `4000` | Global ceiling on upstream exchanges in flight, across *every* path that issues one — foreground resolution, stale refresh, prefetch and probe-driven lookups alike. The permit is acquired per physical exchange in the scheduler, the single point every upstream exchange passes through, so hedges and emergency fan-out count against the same ceiling; a hedge or fan-out attempt that cannot start immediately is shed rather than queued. A query that cannot get one inside its budget is shed as SERVFAIL and counted in `upstream_shed_total`. **Restart-required**: the semaphore is sized once at startup. |
 | `max_blocking_threads` | integer | `4` | Maximum number of blocking threads used for storage and dataset parsing. |
 | `systemd_watchdog` | boolean | `true` | Enable the systemd watchdog when `WATCHDOG_USEC` is present. |
 
