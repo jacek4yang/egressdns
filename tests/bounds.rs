@@ -480,8 +480,8 @@ async fn probe_workers_are_bounded_before_a_job_is_dequeued() {
     let (_handler, addr, _servers) = mock().await;
     let fragment = common::udp_upstream_fragment(addr).replace(
         "[probe]\nenabled = false",
-        "[probe]\nenabled = true\nqueue_size = 4096\ntcp_concurrency = 2\n\
-         tls_concurrency = 2\nhttp_concurrency = 2\nglobal_connections_per_second = 1000",
+        "[probe]\nenabled = true\nqueue_size = 4096\nconcurrency = 2\n\
+         global_connections_per_second = 1000",
     );
     let daemon = Daemon::start(&fragment).await;
     daemon.spawn_background();

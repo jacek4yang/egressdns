@@ -238,7 +238,7 @@ being stored.
 | Client queries in flight | `resources.max_inflight_queries` | `App::inflight` semaphore, acquired in `dns::server` before a query is spawned | Query dropped, `rejected_total{reason="inflight_limit"}` |
 | Upstream exchanges in flight | `resources.max_inflight_upstream` | `Scheduler::resolve` — the one function every upstream query passes through, including stale refresh, prefetch and DNSSEC auxiliary lookups | Waits up to the caller's budget, then SERVFAIL and `upstream_shed_total` |
 | DNSSEC validations in flight | `dnssec.max_concurrent_validations` | `Resolver::fetch`, acquired before the validating handle is used | Waits up to the budget, then SERVFAIL and `dnssec_shed_total` |
-| Probe workers | `probe.tcp/tls/http_concurrency` (minimum of) | `ProbeEngine::run`, acquired **before** the job is taken from the channel | Job stays queued; no task is created for it |
+| Probe workers | `probe.concurrency` | `ProbeEngine::run`, acquired **before** the job is taken from the channel | Job stays queued; no task is created for it |
 | Probe queue depth | `probe.queue_size` | Bounded `mpsc`, `offer()` never awaits | Job dropped and counted |
 | Probe bandwidth | `probe.daily_bandwidth_budget_bytes` | `ProbeGuard::admit`, as an admission gate rather than an after-the-fact tally | Probe refused with `Refusal::BandwidthBudget` |
 | Probe cooldown state | fixed 50,000 entries | `ProbeGuard::prune`, swept every 30 s | Oldest entries dropped |

@@ -154,9 +154,10 @@ impl App {
         let probes = ProbeQueue::new(probe_tx, config.probe.enabled);
 
         let inflight = Arc::new(Semaphore::new(config.resources.max_inflight_queries));
-        // Every upstream query, from every path, takes one of these. Without a single
-        // shared ceiling, background work (prefetch, stale refresh, DNSSEC auxiliary
-        // lookups) multiplies the real fan-out far past whatever the operator configured.
+        // Every physical upstream exchange, from every path, takes one of these. Without
+        // a single shared ceiling, background work (prefetch, stale refresh, DNSSEC
+        // auxiliary lookups) multiplies the real fan-out far past whatever the operator
+        // configured.
         let upstream_slots = Arc::new(Semaphore::new(config.resources.max_inflight_upstream));
         let validation_slots = Arc::new(Semaphore::new(config.dnssec.max_concurrent_validations));
         let prefetch = Arc::new(PrefetchState::new(config.prefetch.enabled));

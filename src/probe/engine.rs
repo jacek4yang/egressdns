@@ -127,7 +127,7 @@ impl ProbeEngine {
         let initial = ctx.config().map(|c| c.probe.clone()).unwrap_or_default();
         Arc::new(Self {
             guard: Arc::new(ProbeGuard::new(&initial)),
-            health: Arc::new(SubsystemHealth::new(initial.tcp_concurrency.max(8) as u32)),
+            health: Arc::new(SubsystemHealth::new(initial.concurrency.max(8) as u32)),
             workers: parking_lot::Mutex::new((0, Arc::new(Semaphore::new(0)))),
             ctx,
             quality,
@@ -268,19 +268,13 @@ impl ProbeEngine {
 
     /// The worker pool ceiling, resized when the configuration changes.
     ///
-    /// Sized from the narrowest stage ceiling, because a worker holds every stage permit
-    /// for the whole exchange; sizing it larger would only create workers that sleep.
+    /// A worker holds its slot for the whole TCP → TLS → HTTP exchange, so the single
+    /// configured ceiling covers every stage.
     fn worker_slots(&self) -> Arc<Semaphore> {
         let want = self
             .ctx
             .config()
-            .map(|c| {
-                c.probe
-                    .tcp_concurrency
-                    .min(c.probe.tls_concurrency)
-                    .min(c.probe.http_concurrency)
-                    .max(1)
-            })
+            .map(|c| c.probe.concurrency.max(1))
             .unwrap_or(1);
         let mut slots = self.workers.lock();
         if slots.0 != want {
@@ -887,21 +881,19 @@ mod tests {
     #[tokio::test]
     async fn worker_slots_are_sized_from_the_live_configuration() {
         let mut config = crate::tasks::test_config();
-        config.probe.tcp_concurrency = 4;
-        config.probe.tls_concurrency = 3;
-        config.probe.http_concurrency = 7;
+        config.probe.concurrency = 4;
         let (app, e) = engine_with(config.clone());
         assert_eq!(
             e.worker_slots().available_permits(),
-            3,
-            "the ceiling is the tightest configured stage"
+            4,
+            "the ceiling is the configured concurrency"
         );
 
-        config.probe.tls_concurrency = 9;
+        config.probe.concurrency = 9;
         app.install_for_test(config);
         assert_eq!(
             e.worker_slots().available_permits(),
-            4,
+            9,
             "a reload must resize the worker ceiling"
         );
         drop(app);

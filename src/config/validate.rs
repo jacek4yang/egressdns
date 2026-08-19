@@ -14,6 +14,13 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> ConfigError {
     ConfigError::invalid(path, message)
 }
 
+/// RFC 9520's ceiling on `cache.failure_max_ttl`.
+///
+/// The failures cache sizes its hard retention bound from this constant (see
+/// `src/cache/mod.rs`), so the retention bound stays valid no matter how a reload
+/// changes the configured value within the permitted range.
+pub const FAILURE_MAX_TTL_CEILING: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Validate a configuration tree. Returns the first violation encountered, with the full
 /// dotted field path.
 pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
@@ -218,7 +225,7 @@ fn validate_cache_and_ttl(cfg: &Config) -> Result<(), ConfigError> {
             "RFC 9520 requires resolution failures to be cached for at least 1 second",
         ));
     }
-    if c.failure_max_ttl.as_secs() > 300 {
+    if c.failure_max_ttl > FAILURE_MAX_TTL_CEILING {
         return Err(err(
             "cache.failure_max_ttl",
             "RFC 9520 requires resolution failures to be cached for no more than 5 minutes",
@@ -327,9 +334,6 @@ fn validate_cache_and_ttl(cfg: &Config) -> Result<(), ConfigError> {
         }
         if p.hot_set_size == 0 {
             return Err(err("prefetch.hot_set_size", "must be greater than zero"));
-        }
-        if p.queue_size == 0 {
-            return Err(err("prefetch.queue_size", "must be greater than zero"));
         }
         if p.transition_prediction && p.transition_table_size == 0 {
             return Err(err(
@@ -644,20 +648,17 @@ fn validate_probe(cfg: &Config) -> Result<(), ConfigError> {
     }
     for (name, v) in [
         ("probe.queue_size", p.queue_size),
-        ("probe.tcp_concurrency", p.tcp_concurrency),
-        ("probe.tls_concurrency", p.tls_concurrency),
-        ("probe.http_concurrency", p.http_concurrency),
+        ("probe.concurrency", p.concurrency),
         ("probe.max_candidates_per_rrset", p.max_candidates_per_rrset),
     ] {
         if v == 0 {
             return Err(err(name, "must be greater than zero"));
         }
     }
-    if p.tcp_concurrency > 1024 || p.tls_concurrency > 512 || p.http_concurrency > 256 {
+    if p.concurrency > 256 {
         return Err(err(
-            "probe.tcp_concurrency",
-            "probe concurrency ceilings are capped at 1024/512/256 to keep the egress \
-             footprint bounded",
+            "probe.concurrency",
+            "must not exceed 256, to keep the egress footprint bounded",
         ));
     }
     if p.global_connections_per_second == 0 || p.global_connections_per_second > 10_000 {
@@ -720,9 +721,6 @@ fn validate_profile(path: &str, prof: &ProbeProfile) -> Result<(), ConfigError> 
             format!("{path}.domains"),
             "must list at least one domain",
         ));
-    }
-    if prof.port == 0 {
-        return Err(err(format!("{path}.port"), "port 0 is not valid"));
     }
     if !prof.path.starts_with('/') {
         return Err(err(format!("{path}.path"), "must start with `/`"));

@@ -636,11 +636,11 @@ pub async fn run_candidate_prober(ctx: super::Ctx) {
         let generation = network.generation();
 
         // Re-measure known candidates that are out of cooldown.
-        for candidate in state.pool().due_for_probe(
-            probe_cfg.per_ip_cooldown,
-            now,
-            probe_cfg.http_concurrency * 2,
-        ) {
+        for candidate in
+            state
+                .pool()
+                .due_for_probe(probe_cfg.per_ip_cooldown, now, probe_cfg.concurrency * 2)
+        {
             probes.offer(ProbeJob::Candidate {
                 addr: candidate.addr,
                 port: 443,

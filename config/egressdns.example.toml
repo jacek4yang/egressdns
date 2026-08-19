@@ -155,7 +155,6 @@ hot_set_size = 20000
 global_qps = 50
 per_key_min_interval = "5s"
 warm_on_start = 200
-queue_size = 4096
 # Sequence prediction is off until benchmark evidence justifies it on your workload.
 transition_prediction = false
 transition_table_size = 20000
@@ -257,9 +256,9 @@ mode = "disabled"                  # disabled | fixed-egress
 [probe]
 enabled = true
 queue_size = 8192
-tcp_concurrency = 32
-tls_concurrency = 16
-http_concurrency = 8
+# One ceiling on concurrent probe exchanges: a worker holds its slot for the whole
+# TCP -> TLS -> HTTP pipeline, so there is nothing per-stage to tune.
+concurrency = 8
 global_connections_per_second = 64
 tcp_timeout = "1s500ms"
 tls_timeout = "3s"
@@ -286,7 +285,6 @@ allow_special_use_targets = []
 # [[probe.profiles]]
 # name = "intranet-portal"
 # domains = [".portal.example.com"]
-# port = 443
 # path = "/healthz"
 # method = "GET"
 # allowed_status = [200]

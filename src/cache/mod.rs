@@ -312,7 +312,6 @@ pub struct DnsCache {
     variants: MokaCache<CacheKey, Arc<VariantSet>>,
     serve_stale: ServeStaleConfig,
     internal_max_ttl: u32,
-    negative_max_ttl: u32,
 }
 
 impl DnsCache {
@@ -331,9 +330,15 @@ impl DnsCache {
             .time_to_live(retention)
             .support_invalidation_closures()
             .build();
+        // The per-entry failure TTL is computed from the live configuration when the
+        // failure is recorded, so the moka TTL is only a retention backstop. Sizing it
+        // from the configured `failure_max_ttl` would freeze that bound at construction:
+        // a reload raising the value would be silently clipped by the old cache. The
+        // validation ceiling is the widest any configured value can ever be, so it is
+        // the strict bound that covers every legal reload.
         let failures = MokaCache::builder()
             .max_capacity(cfg.failure_max_entries)
-            .time_to_live(cfg.failure_max_ttl + Duration::from_secs(1))
+            .time_to_live(crate::config::FAILURE_MAX_TTL_CEILING + Duration::from_secs(1))
             .support_invalidation_closures()
             .build();
         // Weighed in bytes, like the answer cache. A variant set holds up to
@@ -352,18 +357,12 @@ impl DnsCache {
             variants,
             serve_stale: stale.clone(),
             internal_max_ttl: cfg.internal_max_ttl,
-            negative_max_ttl: cfg.negative_max_ttl,
         }
     }
 
     /// Upper bound applied to a positive TTL before storage.
     pub fn internal_max_ttl(&self) -> u32 {
         self.internal_max_ttl
-    }
-
-    /// Upper bound applied to a negative TTL before storage.
-    pub fn negative_max_ttl(&self) -> u32 {
-        self.negative_max_ttl
     }
 
     /// Look up an answer.

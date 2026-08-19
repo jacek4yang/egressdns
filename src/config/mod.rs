@@ -10,6 +10,7 @@ pub mod reload;
 mod validate;
 
 pub use validate::validate;
+pub use validate::FAILURE_MAX_TTL_CEILING;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -499,8 +500,6 @@ pub struct PrefetchConfig {
     pub per_key_min_interval: Duration,
     /// Number of persisted hot names re-resolved at startup.
     pub warm_on_start: usize,
-    /// Bounded prefetch work queue.
-    pub queue_size: usize,
     /// Enable the bounded aggregate transition table (query-sequence prediction).
     /// Disabled by default; see `docs/BENCHMARKS.md` for the evidence requirement.
     pub transition_prediction: bool,
@@ -518,7 +517,6 @@ impl Default for PrefetchConfig {
             global_qps: 50,
             per_key_min_interval: Duration::from_secs(5),
             warm_on_start: 200,
-            queue_size: 4_096,
             transition_prediction: false,
             transition_table_size: 20_000,
         }
@@ -890,12 +888,10 @@ pub struct ProbeConfig {
     pub enabled: bool,
     /// Bounded probe work queue.
     pub queue_size: usize,
-    /// Stage 1 concurrency (TCP connect).
-    pub tcp_concurrency: usize,
-    /// Stage 2 concurrency (TLS handshake).
-    pub tls_concurrency: usize,
-    /// Stage 3 concurrency (HTTP).
-    pub http_concurrency: usize,
+    /// Ceiling on concurrent probe exchanges. A worker holds its slot for the whole
+    /// TCP → TLS → HTTP pipeline, so one ceiling covers every stage; the default
+    /// preserves the tightest of the historical per-stage defaults.
+    pub concurrency: usize,
     /// Global ceiling on new probe connections per second.
     pub global_connections_per_second: u32,
     /// Stage 1 timeout.
@@ -938,9 +934,7 @@ impl Default for ProbeConfig {
         Self {
             enabled: true,
             queue_size: 8_192,
-            tcp_concurrency: 32,
-            tls_concurrency: 16,
-            http_concurrency: 8,
+            concurrency: 8,
             global_connections_per_second: 64,
             tcp_timeout: Duration::from_millis(1_500),
             tls_timeout: Duration::from_millis(3_000),
@@ -967,8 +961,6 @@ pub struct ProbeProfile {
     pub name: String,
     /// Domains this profile applies to. A leading `.` matches the suffix.
     pub domains: Vec<String>,
-    /// Port to probe.
-    pub port: u16,
     /// Health-check path.
     pub path: String,
     /// HTTP method; only `HEAD` and `GET` are permitted.
@@ -992,7 +984,6 @@ impl Default for ProbeProfile {
         Self {
             name: String::new(),
             domains: Vec::new(),
-            port: 443,
             path: "/".to_string(),
             method: "HEAD".to_string(),
             allowed_status: vec![200, 204, 301, 302, 400, 403, 404, 405],

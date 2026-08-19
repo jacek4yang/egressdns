@@ -97,6 +97,7 @@ Everything not in this table applies on reload.
 | `resources.max_blocking_threads` | the Tokio blocking pool is sized once at startup |
 | `resources.max_inflight_queries` | the ingress semaphore is sized once at startup |
 | `resources.max_inflight_upstream` | the upstream semaphore is sized once at startup |
+| `resources.systemd_watchdog` | the watchdog task is spawned once at startup |
 | `cache.max_memory_bytes` / `cache.failure_max_entries` / `cache.variant_max_memory_bytes` | cache capacity is fixed at construction; resizing would mean discarding the cache |
 | `cache.quality_max_entries` | the quality store is sized once at startup |
 | `serve_stale.enabled` / `serve_stale.max_stale` / `cache.internal_max_ttl` | these determine cache retention, which is fixed when the cache is built |
@@ -284,7 +285,6 @@ Hot-name prefetching.
 | `global_qps` | integer | `50` | Global prefetch query budget in queries per second. |
 | `per_key_min_interval` | duration | `5s` | Minimum interval between prefetches of the same cache key. |
 | `warm_on_start` | integer | `200` | Persisted hot names re-resolved at startup, so a restarted process does not begin with an empty cache. Warming runs in a bounded task set with a 30 s drain, is skipped when persistence is disabled, and never delays the listeners: queries are answered from the moment the sockets are bound. `0` disables it. |
-| `queue_size` | integer | `4096` | Bounded prefetch work queue. |
 | `transition_prediction` | boolean | `false` | Enable the bounded aggregate transition table (query-sequence prediction). Disabled by default; see `docs/BENCHMARKS.md` for the evidence requirement. |
 | `transition_table_size` | integer | `20000` | Bound on the transition table. |
 
@@ -397,9 +397,7 @@ Active probe engine: budgets, safety and profiles. Everything here is background
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Master switch. When disabled the resolver never opens a probe connection and all candidates keep neutral scores. |
 | `queue_size` | integer | `8192` | Bounded probe work queue. |
-| `tcp_concurrency` | integer | `32` | Stage 1 concurrency (TCP connect). |
-| `tls_concurrency` | integer | `16` | Stage 2 concurrency (TLS handshake). |
-| `http_concurrency` | integer | `8` | Stage 3 concurrency (HTTP). |
+| `concurrency` | integer | `8` | Single ceiling on concurrent probe exchanges, across all stages: a worker holds its slot for the whole TCP → TLS → HTTP pipeline. Must be between 1 and 256. |
 | `global_connections_per_second` | integer | `64` | Global ceiling on new probe connections per second. |
 | `tcp_timeout` | duration | `1500ms` | Stage 1 timeout. |
 | `tls_timeout` | duration | `3000ms` | Stage 2 timeout. |
@@ -423,7 +421,6 @@ One probe profile.
 | --- | --- | --- | --- |
 | `name` | string | `String::new()` | Profile name. |
 | `domains` | list of string | `[]` (empty) | Domains this profile applies to. A leading `.` matches the suffix. |
-| `port` | integer | `443` | Port to probe. |
 | `path` | string | `"/".to_string()` | Health-check path. |
 | `method` | string | `"HEAD".to_string()` | HTTP method; only `HEAD` and `GET` are permitted. |
 | `allowed_status` | list of integer | `vec![200, 204, 301, 302, 400, 403, 404, 405]` | Status codes considered a successful validation. |
@@ -654,7 +651,7 @@ Process-wide ceilings.
 | `max_inflight_queries` | integer | `20000` | Maximum concurrent in-flight client queries. |
 | `max_inflight_upstream` | integer | `4000` | Global ceiling on upstream exchanges in flight, across *every* path that issues one — foreground resolution, stale refresh, prefetch and probe-driven lookups alike. The permit is acquired per physical exchange in the scheduler, the single point every upstream exchange passes through, so hedges and emergency fan-out count against the same ceiling; a hedge or fan-out attempt that cannot start immediately is shed rather than queued. A query that cannot get one inside its budget is shed as SERVFAIL and counted in `upstream_shed_total`. **Restart-required**: the semaphore is sized once at startup. |
 | `max_blocking_threads` | integer | `4` | Maximum number of blocking threads used for storage and dataset parsing. |
-| `systemd_watchdog` | boolean | `true` | Enable the systemd watchdog when `WATCHDOG_USEC` is present. |
+| `systemd_watchdog` | boolean | `true` | Enable the systemd watchdog when `WATCHDOG_USEC` is present. **Restart-required**: the watchdog task is spawned once at startup. |
 
 
 ---
@@ -686,7 +683,7 @@ resolver that is quietly wrong.
 | `ecs.egress` prefixes must be public, with prefix length ≤ 24 (v4) and ≤ 56 (v6). | RFC 7871 §2 and §11.1. Sending a private prefix leaks the LAN and is useless to the upstream. |
 | A `probe.allow_special_use_targets` entry may not cover a link-local, loopback, multicast or cloud-metadata range. | The probe engine is an outbound HTTP client running as a daemon; letting configuration point it at `169.254.169.254` turns a config file into an SSRF primitive. This is re-checked at call time in `src/probe/safety.rs`, so a bug in the validator is not sufficient to reach one. |
 | `cloudflare.mode = "verified-augment"` requires `probe.enabled = true`. | Augmentation without probe evidence would be guessing, and this daemon does not guess about answers. |
-| Every probe profile needs a unique non-empty name, a non-zero port, a path starting with `/`, and valid HTTP status codes in `allowed_status`. | A malformed profile would otherwise fail silently at probe time, which looks identical to "the address is bad". |
+| Every probe profile needs a unique non-empty name, at least one domain, a path starting with `/`, and valid HTTP status codes in `allowed_status`. | A malformed profile would otherwise fail silently at probe time, which looks identical to "the address is bad". |
 | Every seed endpoint URL must be an absolute `https://` URL. | A cleartext candidate list is an on-path attacker's input to your answers. |
 | `admin.socket` must be an absolute path and `admin.socket_mode` must grant nothing to "other". | The admin socket can flush the cache and change Cloudflare modes; it is not a public interface. |
 | `admin.max_request_bytes` must be between 1 and 1 MiB. | The admin protocol is line-oriented; an unbounded line is an OOM. |

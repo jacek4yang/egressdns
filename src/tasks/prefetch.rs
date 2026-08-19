@@ -2,8 +2,9 @@
 //!
 //! Popular names are refreshed shortly before they expire so that the common case is
 //! always a cache hit. The whole mechanism is budgeted: a global queries-per-second
-//! ceiling, a per-key minimum interval, and a bounded work queue. If the foreground path
-//! starts to suffer, prefetching disables itself rather than competing with real queries.
+//! ceiling that also sizes the in-flight semaphore, and a per-key minimum interval. If
+//! the foreground path starts to suffer, prefetching disables itself rather than
+//! competing with real queries.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

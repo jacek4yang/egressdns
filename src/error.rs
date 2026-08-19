@@ -149,9 +149,9 @@ pub enum ResolveError {
     /// A global concurrency ceiling was reached and the request was shed rather than
     /// queued. Shedding is deliberate: an unbounded queue converts an overload into a
     /// latency collapse that outlasts the overload itself.
-    #[error("upstream concurrency ceiling reached ({limit} permits free)")]
+    #[error("upstream concurrency ceiling reached ({limit} permits configured)")]
     Overloaded {
-        /// Permits still available when the wait expired.
+        /// Configured ceiling of the semaphore whose permits were exhausted.
         limit: usize,
     },
 }

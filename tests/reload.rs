@@ -88,6 +88,55 @@ async fn a_reload_moves_foreground_queries_to_the_new_upstream() {
     );
 }
 
+/// `cache.negative_max_ttl` is classified reloadable, so it must actually be reload-live.
+///
+/// The cache is retained across reloads, so a value captured into it at construction
+/// governed negative caching until a restart while the operator was told the reload had
+/// applied. The bound is now read from the live configuration where the negative TTL is
+/// computed, so a reloaded value governs the very next negative answer.
+#[tokio::test]
+async fn negative_max_ttl_follows_a_reload() {
+    let (handler, addr, _servers) = mock().await;
+    // Every name is NXDOMAIN with a one-hour negative TTL, so the configured cap decides.
+    handler.set_default(Behaviour::NxDomain { minimum: 3_600 });
+    let base = common::udp_upstream_fragment(addr);
+    let loose = format!("{base}\n[cache]\nnegative_max_ttl = 120\n");
+    let daemon = Daemon::start(&loose).await;
+
+    // The authority SOA carries the negative TTL the client was handed.
+    let negative_ttl = |m: &hickory_proto::op::Message| -> u32 {
+        m.authorities
+            .iter()
+            .find(|r| matches!(&r.data, hickory_proto::rr::RData::SOA(_)))
+            .map(|r| r.ttl)
+            .expect("an NXDOMAIN answer carries an SOA")
+    };
+
+    let before = daemon
+        .query_udp(&common::query("before.test.", RecordType::A, false))
+        .await;
+    let before_ttl = negative_ttl(&before);
+    assert!(
+        (46..=120).contains(&before_ttl),
+        "the startup cap must bound the negative TTL, got {before_ttl}"
+    );
+
+    let tight = format!("{base}\n[cache]\nnegative_max_ttl = 45\n");
+    daemon
+        .reload_with(&tight)
+        .expect("cache.negative_max_ttl is reloadable");
+
+    // A fresh name, so the answer cannot come from the pre-reload cache entry.
+    let after = daemon
+        .query_udp(&common::query("after.test.", RecordType::A, false))
+        .await;
+    let after_ttl = negative_ttl(&after);
+    assert!(
+        (1..=45).contains(&after_ttl),
+        "the reloaded cap must govern new negative entries, got {after_ttl}"
+    );
+}
+
 /// Turning probing off by reload must actually stop probe work.
 ///
 /// The probe queue used to be created enabled at startup and never consulted the live

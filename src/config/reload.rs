@@ -111,6 +111,11 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<RestartRequired> {
         "resources.max_inflight_upstream",
         "the upstream semaphore is sized once at startup",
     );
+    check(
+        old.resources.systemd_watchdog != new.resources.systemd_watchdog,
+        "resources.systemd_watchdog",
+        "the watchdog task is spawned once at startup",
+    );
 
     // ---- fixed-capacity structures ----------------------------------------------------
     check(
@@ -228,6 +233,7 @@ const MUTATIONS: &[Mutation] = &[
     |c| c.resources.max_blocking_threads += 1,
     |c| c.resources.max_inflight_queries += 1,
     |c| c.resources.max_inflight_upstream += 1,
+    |c| c.resources.systemd_watchdog = !c.resources.systemd_watchdog,
     |c| c.cache.max_memory_bytes += 1_048_576,
     |c| c.cache.quality_max_entries += 1,
     |c| c.serve_stale.enabled = !c.serve_stale.enabled,
@@ -357,6 +363,10 @@ mod tests {
             (
                 "resources.max_inflight_upstream",
                 Box::new(|c: &mut Config| c.resources.max_inflight_upstream += 1),
+            ),
+            (
+                "resources.systemd_watchdog",
+                Box::new(|c: &mut Config| c.resources.systemd_watchdog = false),
             ),
             (
                 "cache.max_memory_bytes",

@@ -107,7 +107,6 @@ hot_set_size = 50000
 global_qps = 100
 per_key_min_interval = "5s"
 warm_on_start = 500
-queue_size = 8192
 transition_prediction = false
 
 [ranking]
@@ -192,9 +191,7 @@ mode = "disabled"
 [probe]
 enabled = true
 queue_size = 16384
-tcp_concurrency = 32
-tls_concurrency = 16
-http_concurrency = 8
+concurrency = 8
 global_connections_per_second = 64
 tcp_timeout = "1s500ms"
 tls_timeout = "3s"

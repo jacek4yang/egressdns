@@ -49,6 +49,19 @@ documentation.
   aborted.
 * Blocking filesystem I/O moved off runtime workers (secret reading, prefix-cache reads),
   and the prefix cache file is written atomically.
+* **`cache.negative_max_ttl` was accepted on reload but never applied.** The value was
+  captured into the retained cache at construction. It is now read from the live
+  configuration where the negative TTL is computed, and `tests/reload.rs` proves the
+  client-visible TTL follows a reload.
+* **`cache.failure_max_ttl` was silently clipped after a reload that raised it.** The
+  failures cache's retention bound was sized from the startup value. The per-entry TTL is
+  computed from the live configuration; the retention bound is now the RFC 9520 ceiling
+  validation enforces (`config::FAILURE_MAX_TTL_CEILING`), which covers every legal value.
+* **`resources.systemd_watchdog` claimed to be reloadable.** The watchdog task is spawned
+  once at startup, so the field is now classified restart-required and a reload that
+  changes it is refused by name.
+* **`ResolveError::Overloaded` reported "permits free" while carrying the configured
+  ceiling.** The message and the DNSSEC shed site now both pass the configured limit.
 
 ### Added
 
@@ -75,6 +88,13 @@ documentation.
 
 ### Changed
 
+* `probe.tcp_concurrency`, `probe.tls_concurrency` and `probe.http_concurrency` are
+  replaced by a single `probe.concurrency` (default 8, the tightest of the three old
+  defaults). A probe worker holds its slot for the whole TCP → TLS → HTTP exchange, so the
+  worker semaphore was already sized from the minimum of the three; two of the three knobs
+  were always inert. Every configuration table is `deny_unknown_fields`, so a file still
+  carrying an old key fails loudly at startup or reload rather than being silently
+  ignored.
 * `cache.max_entries` and `cache.variant_max_entries` replaced by byte budgets. An entry
   limit does not bound memory, because a DNS answer can be 200 bytes or 2 kilobytes.
 * Hot-set eviction is batched via `select_nth_unstable_by` instead of a full sort per
@@ -97,7 +117,8 @@ missing feature: it tells an operator they have a control they do not have.
 `upstream.tls.tls_client_key_file`, `upstream.groups[].scheduler.max_attempts_per_route`,
 `.variant_sample_qps`, `ecs.strip_inbound`, `ecs.ab_test_fraction`,
 `probe.throughput_concurrency`, `probe.follow_redirects`, `metrics.unix_socket`,
-`cloudflare.sampling.ipv4_enabled`, `cloudflare.sampling.ipv6_enabled`.
+`cloudflare.sampling.ipv4_enabled`, `cloudflare.sampling.ipv6_enabled`,
+`prefetch.queue_size`, `probe.profiles[].port`.
 
 `max_attempts_per_route` is the instructive one. It was validated to be 1–3 in the name of
 RFC 9520 §3.2, but the scheduler makes at most one attempt per route per resolution

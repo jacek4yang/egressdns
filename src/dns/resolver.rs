@@ -908,7 +908,7 @@ impl Resolver {
                 _ => {
                     metrics::counter!(crate::metrics::names::DNSSEC_SHED_TOTAL).increment(1);
                     return Err(ResolveError::Overloaded {
-                        limit: self.validation_slots.available_permits(),
+                        limit: self.validation_capacity,
                     });
                 }
             };
@@ -974,7 +974,9 @@ impl Resolver {
         };
         let cap = match kind {
             EntryKind::Positive => self.cache.internal_max_ttl(),
-            _ => self.cache.negative_max_ttl(),
+            // Read live, like failure_min_ttl below: the cache is retained across
+            // reloads, so a value captured into it would silently ignore a reload.
+            _ => self.config.cache.negative_max_ttl,
         };
         let ttl = raw_ttl.min(cap);
 
