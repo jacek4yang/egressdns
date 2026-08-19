@@ -31,7 +31,9 @@ entire test suite accepted.
 | The installer canary rejects a broken resolver | **Tested** — `tests/installer.rs`, five cases, running `canary()` extracted from the shipped `install.sh` |
 | `dig` exits 0 on REFUSED, so the old canary passed a dead resolver | **Measured** — verified against a daemon whose ACL excluded loopback |
 | Sustained soak | **Measured** — 15 minutes, 32.4M queries, 36,048 qps, 100% success, RSS flat at 102.2 MB, 14 fds, 6 threads |
-| CI green on the branch | **Measured** — run 32307730101, all seven jobs including the aarch64 cross build |
+| CI green on the branch | **Measured** — run 32308436155, all seven jobs including the aarch64 cross build |
+| The aarch64 binary actually runs | **Measured** — the published aarch64 artifact under qemu-user: config validates, A queries answer, the `ad` flag is set on a signed name, TCP answers, NXDOMAIN is correct. Emulated, not native hardware. |
+| Release artifacts are reproducible from the workflow | **Measured** — v2.0.0-rc2 archives for x86_64 and aarch64 built by CI, `sha256sum -c SHA256SUMS` verifies |
 | Proxy egress | **Not implemented.** Declaring one is a hard error. |
 | DDR, SVCB/HTTPS discovery, RESINFO, ECH, ODoH, MASQUE | **Not implemented.** |
 
