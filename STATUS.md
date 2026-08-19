@@ -27,6 +27,11 @@ entire test suite accepted.
 | Reload publishes one coherent policy generation | **Structural** — the request path reads config-derived policy from the `Config` the `ArcSwap` publishes; plus **Tested** by `effective_mode_ignores_an_override_stronger_than_the_live_configuration` |
 | Real DNSSEC validation works end to end | **Measured** — `dig +dnssec @127.0.0.1 cloudflare.com A` returns NOERROR with the `ad` flag set, against real upstreams on port 53 |
 | systemd lifecycle is clean | **Measured** — two `reload`s under continuous traffic with zero failed queries; `stop`/`start` cycle clean; `systemd-analyze security` **1.7 OK** |
+| Answers agree with Unbound | **Measured** — `scripts/differential-test.py`, both forwarding to the same upstream, Unbound 1.22.0 with DNSSEC validation: **15 cases agree, 0 differ** |
+| The installer canary rejects a broken resolver | **Tested** — `tests/installer.rs`, five cases, running `canary()` extracted from the shipped `install.sh` |
+| `dig` exits 0 on REFUSED, so the old canary passed a dead resolver | **Measured** — verified against a daemon whose ACL excluded loopback |
+| Sustained soak | **Measured** — 15 minutes, 32.4M queries, 36,048 qps, 100% success, RSS flat at 102.2 MB, 14 fds, 6 threads |
+| CI green on the branch | **Measured** — run 32307730101, all seven jobs including the aarch64 cross build |
 | Proxy egress | **Not implemented.** Declaring one is a hard error. |
 | DDR, SVCB/HTTPS discovery, RESINFO, ECH, ODoH, MASQUE | **Not implemented.** |
 

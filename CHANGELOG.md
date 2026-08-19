@@ -79,6 +79,30 @@ harness after a change that every test in the suite accepted.
   `EADDRINUSE` and was reported as a port conflict that did not exist, and an IPv4
   wildcard socket was matched as the owner of an IPv6 address, turning one healthy
   listener into four phantom conflicts.
+* **The installer's post-install canary passed a resolver that answered nothing.** `dig`
+  exits 0 for SERVFAIL, REFUSED and NXDOMAIN alike, and the check only inspected that exit
+  status — so a daemon refusing every query was declared healthy and kept rather than
+  rolled back. It now requires NOERROR *and* an address in the answer section.
+* **The release workflow could not express a release candidate.** It required the tag to
+  equal `v${CARGO_VERSION}` exactly, so tagging `v2.0.0-rc1` against a 2.0.0 manifest
+  failed in ten seconds — making the project's own release policy unimplementable by its
+  own tooling. A SemVer pre-release suffix is now accepted and marked as a prerelease.
+* **The aarch64 CI job was timing out.** A full release build with thin LTO and
+  codegen-units=1 took 38m19s on a good run and hit the 45-minute limit on the next,
+  reported as `cancelled`. The job proves the target compiles and links, so it uses the
+  dev profile now: the whole CI run went from 38-45 minutes to 6m29s.
+
+### Testing
+
+* `scripts/differential-test.py` compares EgressDNS against Unbound with both forwarding
+  to the same upstream, so a difference is a difference in our semantics rather than in
+  what the Internet said. Fifteen cases: positive A and AAAA, a CNAME chain, MX, TXT,
+  DNSKEY, DS, HTTPS, SOA, NS, an underscore label, NODATA, NXDOMAIN, a signed zone and a
+  deliberately bogus one. Answer sets are compared unordered, because reordering addresses
+  is the point of the program, and TTLs only for being no higher, because policy may only
+  reduce. Against Unbound 1.22.0 with DNSSEC validation: **15 agree, 0 differ.**
+* `tests/installer.rs` runs the shipped `canary()` verbatim against a working resolver and
+  against REFUSED, SERVFAIL, NOERROR-with-no-answer and a dead address.
 
 ### Performance
 
@@ -87,6 +111,17 @@ cache-hit 38,504 vs 38,358 qps (p99 2.73 vs 2.76 ms), mixed 37,449 vs 37,400, mi
 17,886 vs 16,932 (p99 9.28 vs 10.89 ms), servfail 16,078 vs 14,843, truncation 16,336 vs
 14,948 (p99 10.04 vs 11.29 ms). Parity on the cache-served paths, 5–9% better where the
 upstream is involved, no scenario regressing.
+
+### Verified
+
+* 487 tests; `fmt`, `clippy -D warnings`, `rustdoc -D warnings`, `cargo deny`, `cargo
+  audit`, `ruff`, and the configuration, reload-classification, production-path and
+  Actions-pinning audits all clean. CI green on all seven jobs.
+* Real host, Debian 13, port 53, unprivileged service account: A and AAAA answer, DNSSEC
+  `ad` set on signed names, fails closed on a bogus one, TCP answers, NXDOMAIN matches
+  upstream, two reloads under continuous traffic with zero failed queries,
+  `systemd-analyze security` 1.7 OK.
+* Soak: 15 minutes, 32.4 million queries, 100% success, RSS flat, no fd or thread growth.
 
 ### Known limitations
 
