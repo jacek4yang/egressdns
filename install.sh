@@ -286,10 +286,29 @@ download_release() {
 }
 
 build_locally() {
-    need_tool cargo
     need_tool tar
+    local user_home=""
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+        [ -n "$user_home" ] || user_home="/home/$SUDO_USER"
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        # cargo is usually installed per-user by rustup, and sudo drops it from PATH.
+        # Fall back to the invoking user's rustup toolchain before giving up.
+        if [ -n "$user_home" ] && [ -x "$user_home/.cargo/bin/cargo" ]; then
+            PATH="$user_home/.cargo/bin:$PATH"
+            log "cargo not on PATH as root; using $user_home/.cargo/bin"
+        fi
+    fi
+    need_tool cargo
     log "building from source with cargo build --release --locked"
-    cargo build --release --locked
+    if [ -n "$user_home" ]; then
+        # Build as the invoking user so target/ does not end up root-owned.
+        sudo -u "$SUDO_USER" env HOME="$user_home" PATH="$PATH" \
+            cargo build --release --locked
+    else
+        cargo build --release --locked
+    fi
     STAGE_DIR="target/release"
     [ -f "$STAGE_DIR/$DAEMON" ] || die "build did not produce $DAEMON"
 }
@@ -304,6 +323,9 @@ install_files() {
         if [ -f "$candidate" ]; then unit_src="$candidate"; break; fi
     done
     if [ -n "$unit_src" ]; then
+        # The unit directory always exists on a real systemd host; create it so the
+        # EGRESSDNS_TEST_ROOT path exercises the same steps.
+        install -d -m 0755 "$(path "$(dirname "$UNIT_PATH")")"
         install -m 0644 "$unit_src" "$(path "$UNIT_PATH")"
         log "installed the systemd unit"
     else
