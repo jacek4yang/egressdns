@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{a, Behaviour, Daemon, MockUpstream, TestCa, Transports};
+use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
 async fn mock() -> (MockUpstream, std::net::SocketAddr, common::MockServers) {
@@ -39,7 +40,7 @@ async fn mock() -> (MockUpstream, std::net::SocketAddr, common::MockServers) {
 /// The ceiling used to exist only as a number in the configuration struct. Nothing on any
 /// path acquired against it, so an upstream that stopped answering could accumulate an
 /// unbounded number of in-flight exchanges. The semaphore now lives in the scheduler, on
-/// the single path every upstream query goes through.
+/// the single path every physical upstream exchange goes through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn max_inflight_upstream_actually_bounds_upstream_work() {
     const LIMIT: usize = 4;
@@ -158,6 +159,225 @@ async fn shedding_at_the_upstream_ceiling_is_visible() {
         daemon.app.upstream_slots_available(),
         1,
         "every shed and every success must return its permit"
+    );
+}
+
+/// Hedging must not multiply the upstream ceiling.
+///
+/// One resolution can run a primary and a hedge at the same time, against two different
+/// routes. When the permit was held per resolution rather than per physical exchange,
+/// two in-flight resolutions became four concurrent exchanges at the upstream. The
+/// permit now brackets each exchange, so two is two — and a hedge that cannot start
+/// immediately is shed rather than queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hedging_cannot_multiply_the_upstream_ceiling() {
+    const LIMIT: usize = 2;
+    let handler = MockUpstream::new();
+    handler.set_default(Behaviour::Delay(
+        Duration::from_millis(300),
+        Box::new(Behaviour::Answer(vec![a("hedged.test.", 1, "192.0.2.40")])),
+    ));
+    // Two addresses behind one handler: hedging needs two rankable routes, and the
+    // shared handler keeps peak_inflight a global count across both of them.
+    let (_servers, addrs) = common::start_mock_multi(handler.clone(), 2).await;
+
+    let fragment = format!(
+        "{}\n[resources]\nmax_inflight_upstream = {LIMIT}\n",
+        common::udp_upstream_fragment_multi(&addrs).replace(
+            "hedge_enabled = false",
+            "hedge_enabled = true\nhedge_min_delay = \"1ms\"\nhedge_max_fraction = 1.0",
+        )
+    );
+    let daemon = Arc::new(Daemon::start(&fragment).await);
+
+    // Far more distinct names than the ceiling, so singleflight cannot mask the effect.
+    let mut queries = Vec::new();
+    for i in 0..40u32 {
+        let daemon = Arc::clone(&daemon);
+        queries.push(tokio::spawn(async move {
+            daemon
+                .try_query_udp(
+                    &common::query(&format!("h{i}.hedged.test."), RecordType::A, false),
+                    Duration::from_secs(20),
+                )
+                .await
+        }));
+    }
+    for q in queries {
+        let _ = tokio::time::timeout(Duration::from_secs(40), q).await;
+    }
+
+    // A cancelled hedge cannot un-send its datagram: the mock still finishes processing
+    // it after the permit has been released, so the server-side count can transiently
+    // exceed the ceiling by the number of such zombies. Creating a zombie takes a
+    // resolution holding *both* slots (winner plus loser), so with a ceiling of two at
+    // most one can overlap the live exchanges.
+    let observed = handler.peak_inflight();
+    assert!(observed > 0, "the upstream must have been reached at all");
+    assert!(
+        observed <= LIMIT + 1,
+        "upstream concurrency reached {observed}, more than one cancelled-hedge zombie \
+         above the configured ceiling of {LIMIT}"
+    );
+    assert_eq!(
+        daemon.app.upstream_slots_available(),
+        LIMIT,
+        "every exchange, shed or completed, must return its permit"
+    );
+
+    // Without queue pressure the exact bound is observable: two resolutions, each
+    // wanting a primary plus a hedge, must never exceed two exchanges on the wire.
+    // Before the fix this reached four.
+    handler.reset_counts();
+    let mut queries = Vec::new();
+    for i in 0..LIMIT {
+        let daemon = Arc::clone(&daemon);
+        queries.push(tokio::spawn(async move {
+            daemon
+                .try_query_udp(
+                    &common::query(&format!("q{i}.hedged.test."), RecordType::A, false),
+                    Duration::from_secs(20),
+                )
+                .await
+        }));
+    }
+    for q in queries {
+        let _ = tokio::time::timeout(Duration::from_secs(20), q).await;
+    }
+    let observed = handler.peak_inflight();
+    assert!(
+        observed > 1,
+        "the two resolutions must actually overlap upstream for the bound to mean anything"
+    );
+    assert!(
+        observed <= LIMIT,
+        "primary plus hedge per resolution reached {observed} concurrent exchanges, \
+         above the configured ceiling of {LIMIT}"
+    );
+}
+
+/// Emergency fan-out must not multiply the upstream ceiling either.
+///
+/// Fan-out fires when every tried route failed, so its exchanges are real wire traffic
+/// on top of the primary's. With a per-resolution permit, one resolution tripled the
+/// configured ceiling here; with a per-exchange permit the fan-out attempts contend for
+/// the same single slot as everything else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn emergency_fanout_cannot_multiply_the_upstream_ceiling() {
+    let handler = MockUpstream::new();
+    // Slow enough that overlapping exchanges are observable, failing so that fan-out
+    // fires after the primary.
+    handler.set_default(Behaviour::Delay(
+        Duration::from_millis(100),
+        Box::new(Behaviour::ServFail),
+    ));
+    let (_servers, addrs) = common::start_mock_multi(handler.clone(), 4).await;
+
+    let fragment = format!(
+        "{}\n[resources]\nmax_inflight_upstream = 1\n",
+        common::udp_upstream_fragment_multi(&addrs)
+    );
+    let daemon = Arc::new(Daemon::start(&fragment).await);
+
+    // One query at a time first, so the fan-out's non-blocking acquire is not crowded
+    // out by queued primaries: this proves the fan-out really does reach the upstream
+    // and is therefore covered by the bound asserted below.
+    for i in 0..6u32 {
+        let response = daemon
+            .query_udp(&common::query(
+                &format!("s{i}.fanout.test."),
+                RecordType::A,
+                false,
+            ))
+            .await;
+        assert_eq!(
+            response.metadata.response_code,
+            ResponseCode::ServFail,
+            "a failing upstream must yield SERVFAIL"
+        );
+    }
+    assert!(
+        handler.query_count() >= 12,
+        "each query should cost a primary plus a fan-out exchange, saw {}",
+        handler.query_count()
+    );
+
+    // Then a concurrent burst, where primaries, fan-out attempts and sheds mix.
+    let mut queries = Vec::new();
+    for i in 0..12u32 {
+        let daemon = Arc::clone(&daemon);
+        queries.push(tokio::spawn(async move {
+            daemon
+                .try_query_udp(
+                    &common::query(&format!("c{i}.fanout.test."), RecordType::A, false),
+                    Duration::from_secs(20),
+                )
+                .await
+        }));
+    }
+    let mut answered = 0;
+    for q in queries {
+        if let Ok(Ok(Some(response))) = tokio::time::timeout(Duration::from_secs(30), q).await {
+            assert_eq!(
+                response.metadata.response_code,
+                ResponseCode::ServFail,
+                "overload and upstream failure both surface as SERVFAIL"
+            );
+            answered += 1;
+        }
+    }
+    assert_eq!(answered, 12, "every query must be answered, shed or not");
+
+    assert_eq!(
+        handler.peak_inflight(),
+        1,
+        "upstream concurrency reached {} against a configured ceiling of 1",
+        handler.peak_inflight()
+    );
+    assert_eq!(
+        daemon.app.upstream_slots_available(),
+        1,
+        "every exchange, shed or completed, must return its permit"
+    );
+}
+
+/// A truncated UDP answer retried over TCP must not deadlock against the ceiling.
+///
+/// The stream retry is a second physical exchange inside one resolution. If the permit
+/// were still held for the whole resolution while the retry had to acquire its own, a
+/// limit of one would deadlock the resolution against itself: the retry could never get
+/// the permit the resolution is holding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn truncation_retry_does_not_deadlock_at_a_ceiling_of_one() {
+    let (handler, addr, _servers) = mock().await;
+    handler.set_default(Behaviour::TruncatedOnUdp(vec![a(
+        "trunc.test.",
+        300,
+        "192.0.2.60",
+    )]));
+
+    let fragment = format!(
+        "{}\n[resources]\nmax_inflight_upstream = 1\n",
+        common::udp_upstream_fragment(addr)
+    );
+    let daemon = Daemon::start(&fragment).await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        daemon.query_udp(&common::query("trunc.test.", RecordType::A, false)),
+    )
+    .await
+    .expect("the stream retry must complete well inside the budget");
+    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        common::addresses(&response).len(),
+        1,
+        "the full answer must come from the stream retry, not the truncated UDP answer"
+    );
+    assert_eq!(
+        daemon.app.upstream_slots_available(),
+        1,
+        "the UDP exchange and the TCP retry must each return their permit"
     );
 }
 

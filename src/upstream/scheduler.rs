@@ -126,10 +126,38 @@ impl Drop for HalfOpenSlot {
 /// Outcome of a single attempt, used internally.
 struct AttemptResult {
     route: Arc<Route>,
-    outcome: AttemptOutcome,
+    /// `None` when the attempt was shed at the global exchange ceiling before a single
+    /// packet was sent. A shed attempt carries no evidence about the route, so callers
+    /// must skip health recording and outcome metrics for it.
+    outcome: Option<AttemptOutcome>,
     latency: Option<Duration>,
     message: Option<Message>,
     detail: String,
+}
+
+impl AttemptResult {
+    /// An attempt that never reached the route because no exchange permit was available.
+    fn shed(route: Arc<Route>) -> Self {
+        Self {
+            route,
+            outcome: None,
+            latency: None,
+            message: None,
+            detail: String::from("shed at the upstream concurrency ceiling"),
+        }
+    }
+}
+
+/// How an attempt acquires its global upstream-exchange permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermitPolicy {
+    /// Bounded wait: the primary attempt and a truncation retry may queue for a permit,
+    /// but only within their own timeout — an overloaded resolver must shed load, not
+    /// queue forever.
+    Queue,
+    /// No wait: a hedge or an emergency fan-out attempt that cannot start immediately
+    /// has already failed its purpose, so it is shed rather than queued.
+    Shed,
 }
 
 impl Scheduler {
@@ -158,7 +186,8 @@ impl Scheduler {
             .clone()
     }
 
-    /// The registry this scheduler drives.
+    /// Physical upstream exchanges currently in flight, derived from the same semaphore
+    /// every attempt acquires against.
     pub fn inflight(&self) -> usize {
         self.capacity.saturating_sub(self.slots.available_permits())
     }
@@ -274,22 +303,12 @@ impl Scheduler {
     ) -> Result<UpstreamAnswer, ResolveError> {
         let start = Instant::now();
 
-        // Every upstream query in the process passes through here — foreground misses,
-        // stale refreshes, prefetches, DNSSEC auxiliary lookups and truncation retries
-        // alike — so this is the one place a global ceiling is worth enforcing. The permit
-        // is held only for the duration of the exchange and is never held across the
-        // acquisition of another permit, so it cannot deadlock. Waiting is bounded by the
-        // caller's own budget: an overloaded resolver must shed load, not queue forever.
-        let _slot =
-            match tokio::time::timeout(budget, Arc::clone(&self.slots).acquire_owned()).await {
-                Ok(Ok(permit)) => permit,
-                _ => {
-                    metrics::counter!(crate::metrics::names::UPSTREAM_SHED_TOTAL).increment(1);
-                    return Err(ResolveError::Overloaded {
-                        limit: self.slots.available_permits(),
-                    });
-                }
-            };
+        // The global ceiling on upstream exchanges is enforced per physical attempt in
+        // `attempt`, not here: one resolution can run a primary, a hedge and an
+        // emergency fan-out at the same time, so a per-resolution permit would let the
+        // real fan-out reach a multiple of the configured ceiling — and a resolution
+        // holding a permit while its own attempts queue for another could starve the
+        // truncation retry it is waiting on.
 
         let hedge_budget = self.budget(&group.name);
         hedge_budget.record_query();
@@ -313,6 +332,7 @@ impl Scheduler {
             attempt_timeout,
             Duration::ZERO,
             None,
+            PermitPolicy::Queue,
         ));
 
         if cfg.hedge_enabled && ranked.len() > 1 && hedge_budget.allows(cfg.hedge_max_fraction) {
@@ -325,12 +345,17 @@ impl Scheduler {
                     attempt_timeout,
                     delay,
                     Some(Arc::clone(&hedge_budget)),
+                    PermitPolicy::Shed,
                 ));
             }
         }
 
         let mut tried = 2.min(ranked.len());
         let mut fanned_out = false;
+        // Whether any attempt actually reached an upstream. A resolution in which every
+        // attempt was shed at the ceiling is overload, not upstream failure, and must be
+        // reported as such.
+        let mut any_exchange = false;
 
         loop {
             let remaining = budget.saturating_sub(start.elapsed());
@@ -351,15 +376,34 @@ impl Scheduler {
 
             match next {
                 Some(result) => {
+                    // An attempt shed at the exchange ceiling never reached the route:
+                    // recording it would let a local saturation event flap circuit
+                    // breakers, and the outcome metrics would blame a server for load
+                    // the resolver generated itself.
+                    let Some(outcome) = result.outcome else {
+                        if Arc::ptr_eq(&result.route, &ranked[0]) {
+                            // The primary could not start inside its own timeout, so the
+                            // resolver is overloaded. Report it exactly as the old
+                            // resolve-entry shed did: SERVFAIL plus the shed counter.
+                            metrics::counter!(crate::metrics::names::UPSTREAM_SHED_TOTAL)
+                                .increment(1);
+                            return Err(ResolveError::Overloaded {
+                                limit: self.capacity,
+                            });
+                        }
+                        last_detail = result.detail;
+                        continue;
+                    };
+                    any_exchange = true;
                     let now = Instant::now();
                     result
                         .route
-                        .with_health(|h| h.record(result.outcome, result.latency, now, cfg));
+                        .with_health(|h| h.record(outcome, result.latency, now, cfg));
                     metrics::counter!(
                         crate::metrics::names::UPSTREAM_QUERIES_TOTAL,
                         "server" => result.route.key.server.to_string(),
                         "transport" => result.route.key.transport.label(),
-                        "outcome" => result.outcome.label(),
+                        "outcome" => outcome.label(),
                     )
                     .increment(1);
                     if let Some(latency) = result.latency {
@@ -370,7 +414,7 @@ impl Scheduler {
                         )
                         .record(latency.as_secs_f64());
                     }
-                    if result.outcome == AttemptOutcome::Success {
+                    if outcome == AttemptOutcome::Success {
                         if let Some(msg) = result.message {
                             let latency = result.latency.unwrap_or_default();
                             // Truncated UDP answers must be retried over a stream
@@ -417,6 +461,7 @@ impl Scheduler {
                                 attempt_timeout,
                                 Duration::ZERO,
                                 None,
+                                PermitPolicy::Shed,
                             ));
                             metrics::counter!(crate::metrics::names::UPSTREAM_DUPLICATES_TOTAL)
                                 .increment(1);
@@ -425,6 +470,15 @@ impl Scheduler {
                         if extra > 0 {
                             continue;
                         }
+                    }
+                    if !any_exchange {
+                        // Every attempt was shed before reaching an upstream: overload,
+                        // not upstream failure, so report it exactly as the old
+                        // resolve-entry shed did.
+                        metrics::counter!(crate::metrics::names::UPSTREAM_SHED_TOTAL).increment(1);
+                        return Err(ResolveError::Overloaded {
+                            limit: self.capacity,
+                        });
                     }
                     return Err(ResolveError::AllFailed {
                         detail: crate::util::bounded(&last_detail, 160),
@@ -465,13 +519,19 @@ impl Scheduler {
                     timeout,
                     Duration::ZERO,
                     None,
+                    PermitPolicy::Queue,
                 )
                 .await;
+            // A shed retry never reached the route, so it must not move the route's
+            // health: local overload is not evidence of failure.
+            let Some(outcome) = result.outcome else {
+                continue;
+            };
             let now = Instant::now();
             result
                 .route
-                .with_health(|h| h.record(result.outcome, result.latency, now, &group.scheduler));
-            if result.outcome == AttemptOutcome::Success {
+                .with_health(|h| h.record(outcome, result.latency, now, &group.scheduler));
+            if outcome == AttemptOutcome::Success {
                 if let Some(msg) = result.message {
                     return Some(UpstreamAnswer {
                         message: msg,
@@ -487,6 +547,7 @@ impl Scheduler {
     }
 
     /// One attempt against one route, optionally after a delay.
+    #[allow(clippy::too_many_arguments)]
     async fn attempt(
         &self,
         route: Arc<Route>,
@@ -495,10 +556,37 @@ impl Scheduler {
         timeout: Duration,
         delay: Duration,
         hedge_budget: Option<Arc<HedgeBudget>>,
+        policy: PermitPolicy,
     ) -> AttemptResult {
+        // A queued hedge must not hold an exchange permit while it sleeps: the delay
+        // exists to give the primary a head start, and holding a global slot through it
+        // would subtract that capacity from real exchanges.
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
+
+        // Every physical exchange — primary, hedge, emergency fan-out and truncation
+        // retry alike — funnels through here, so this is where the global ceiling binds:
+        // the permit brackets connect plus send, bounding exchanges on the wire rather
+        // than resolutions. Waiting is bounded by the attempt's own timeout, which
+        // never exceeds the caller's remaining budget; attempts whose value depends on
+        // starting immediately do not wait at all. A shed attempt reports no outcome,
+        // because it carries no evidence about the route. The permit is held across the
+        // send await, so a dropped attempt future — a losing hedge, a budget expiry —
+        // releases it: cancellation cannot leak a slot.
+        let _permit = match policy {
+            PermitPolicy::Queue => {
+                match tokio::time::timeout(timeout, Arc::clone(&self.slots).acquire_owned()).await {
+                    Ok(Ok(permit)) => permit,
+                    _ => return AttemptResult::shed(route),
+                }
+            }
+            PermitPolicy::Shed => match Arc::clone(&self.slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => return AttemptResult::shed(route),
+            },
+        };
+
         if let Some(budget) = hedge_budget {
             budget.record_hedge();
             metrics::counter!(
@@ -541,7 +629,7 @@ impl Scheduler {
         {
             Err((outcome, detail)) => AttemptResult {
                 route,
-                outcome,
+                outcome: Some(outcome),
                 latency: None,
                 message: None,
                 detail,
@@ -558,7 +646,7 @@ impl Scheduler {
                         }
                         AttemptResult {
                             route,
-                            outcome: AttemptOutcome::Success,
+                            outcome: Some(AttemptOutcome::Success),
                             latency: Some(latency),
                             message: Some(msg),
                             detail: String::new(),
@@ -566,7 +654,7 @@ impl Scheduler {
                     }
                     Err((outcome, detail)) => AttemptResult {
                         route,
-                        outcome,
+                        outcome: Some(outcome),
                         latency: Some(latency),
                         message: None,
                         detail,

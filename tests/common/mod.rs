@@ -529,6 +529,34 @@ pub async fn start_mock(
     out
 }
 
+/// Start one mock handler behind several UDP listeners on loopback.
+///
+/// Routes are per address, so a group of N servers gives the scheduler N rankable
+/// routes — the minimum hedging needs — while every listener is driven by the same
+/// handler, which keeps `peak_inflight` a single global count across all of them.
+pub async fn start_mock_multi(
+    handler: MockUpstream,
+    udp_listeners: usize,
+) -> (MockServers, Vec<SocketAddr>) {
+    let mut server = hickory_server::server::Server::new(handler);
+    let mut addrs = Vec::with_capacity(udp_listeners);
+    for _ in 0..udp_listeners {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp bind");
+        addrs.push(socket.local_addr().expect("udp addr"));
+        server.register_socket(socket);
+    }
+    let out = MockServers {
+        udp: addrs.first().copied(),
+        tcp: None,
+        dot: None,
+        doh2: None,
+        doq: None,
+        doh3: None,
+        server,
+    };
+    (out, addrs)
+}
+
 /// Build a query message.
 pub fn query(name: &str, qtype: RecordType, dnssec_ok: bool) -> hickory_proto::op::Message {
     let mut m = hickory_proto::op::Message::new(
@@ -827,6 +855,50 @@ enabled = false
 "#,
         ip = addr.ip(),
         port = addr.port()
+    )
+}
+
+/// Configuration fragment for a single upstream group with several plain-UDP servers.
+///
+/// All servers sit in one group, so the scheduler ranks them against each other;
+/// hedging requires at least two rankable routes, which means at least two addresses.
+pub fn udp_upstream_fragment_multi(addrs: &[SocketAddr]) -> String {
+    let servers: String = addrs
+        .iter()
+        .enumerate()
+        .map(|(i, addr)| {
+            format!(
+                r#"
+[[upstream.groups.servers]]
+name = "mock-udp-{i}"
+transport = "udp"
+addresses = ["{ip}"]
+port = {port}
+enable_cookies = false
+"#,
+                ip = addr.ip(),
+                port = addr.port()
+            )
+        })
+        .collect();
+    format!(
+        r#"
+[[upstream.groups]]
+name = "default"
+{servers}
+[upstream.groups.scheduler]
+hedge_enabled = false
+query_timeout = "2s"
+
+[dnssec]
+mode = "off"
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#
     )
 }
 
