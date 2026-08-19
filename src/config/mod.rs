@@ -6,6 +6,7 @@
 //! itself is an atomic pointer swap (see [`crate::runtime::App`]).
 
 mod defaults;
+pub mod endpoint;
 pub mod reload;
 mod validate;
 
@@ -29,6 +30,24 @@ use defaults as d;
 #[serde(deny_unknown_fields, default)]
 #[derive(Default)]
 pub struct Config {
+    /// Configuration format version.
+    ///
+    /// `2` selects the intent-oriented front-end: `upstreams` describes where to ask and
+    /// the daemon derives transports, families and route candidates. Omitting it selects
+    /// the advanced form, where every upstream is declared in full under
+    /// `[[upstream.groups]]`. The two are mutually exclusive by design — a file that
+    /// says both would leave an operator guessing which one is in force.
+    pub version: Option<u32>,
+    /// Where to ask, in the v2 endpoint URI form. Requires `version = 2`.
+    ///
+    /// Accepts a bare address (`1.1.1.1`, `[2606:4700:4700::1111]:5353`), a provider
+    /// alias (`cloudflare`), or a URI (`https://dns.quad9.net/dns-query`,
+    /// `tls://dns.quad9.net`, `quic://dns.adguard-dns.com`).
+    pub upstreams: Vec<String>,
+    /// Egress proxies, reserved. Declaring one is refused rather than ignored, because a
+    /// proxy that is accepted and not used sends traffic the operator believes is
+    /// tunnelled straight out of the host.
+    pub proxies: Vec<String>,
     /// Inbound DNS service settings.
     pub server: ServerConfig,
     /// Cache sizing and behaviour.
@@ -81,12 +100,83 @@ impl Config {
 
     /// Parse and validate configuration from a TOML string.
     pub fn from_toml(text: &str, path: &str) -> Result<Self, ConfigError> {
-        let cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Toml {
+        let mut cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Toml {
             path: path.to_string(),
             source,
         })?;
+        cfg.apply_v2_front_end()?;
         validate(&cfg)?;
         Ok(cfg)
+    }
+
+    /// Expand the v2 endpoint list into the server definitions the resolver runs on.
+    ///
+    /// Runs before validation so that everything downstream — validation, the reload
+    /// contract, the effective-configuration dump, `doctor` — sees one representation and
+    /// cannot disagree with itself about what is configured.
+    fn apply_v2_front_end(&mut self) -> Result<(), ConfigError> {
+        match self.version {
+            None => {
+                // The advanced form. Endpoint URIs are a v2 feature, and silently
+                // ignoring them would leave the daemon talking to the default upstreams
+                // while the file says otherwise.
+                if !self.upstreams.is_empty() {
+                    return Err(ConfigError::invalid(
+                        "upstreams",
+                        "`upstreams` requires `version = 2` at the top of the file",
+                    ));
+                }
+                if !self.proxies.is_empty() {
+                    return Err(ConfigError::invalid(
+                        "proxies",
+                        "`proxies` requires `version = 2` at the top of the file",
+                    ));
+                }
+                return Ok(());
+            }
+            Some(2) => {}
+            Some(other) => {
+                return Err(ConfigError::invalid(
+                    "version",
+                    format!(
+                        "unsupported configuration version {other}; this build understands \
+                         version 2, or omit `version` for the advanced form"
+                    ),
+                ));
+            }
+        }
+
+        // Proxy support is not implemented. Accepting the key and doing nothing would be
+        // worse than refusing: the operator would believe egress was tunnelled.
+        if !self.proxies.is_empty() {
+            return Err(ConfigError::invalid(
+                "proxies",
+                "proxy egress is not implemented in this release; remove `proxies` or \
+                 route the daemon's egress at the network layer",
+            ));
+        }
+
+        // `upstream.groups` has a default value, so "not empty" is not the same as
+        // "declared". Comparing against the default is what distinguishes a file that
+        // wrote `[[upstream.groups]]` from one that simply did not mention it.
+        if self.upstream.groups != UpstreamConfig::default().groups {
+            return Err(ConfigError::invalid(
+                "upstream.groups",
+                "a `version = 2` file describes upstreams with the `upstreams` list; \
+                 remove `[[upstream.groups]]`, or drop `version` to use the advanced form",
+            ));
+        }
+
+        let servers = endpoint::desugar(&self.upstreams)
+            .map_err(|detail| ConfigError::invalid("upstreams", detail))?;
+
+        self.upstream.default_group = String::from("default");
+        self.upstream.groups = vec![UpstreamGroupConfig {
+            name: String::from("default"),
+            servers,
+            scheduler: SchedulerConfig::default(),
+        }];
+        Ok(())
     }
 
     /// Render the effective configuration as TOML with secrets redacted.

@@ -154,6 +154,61 @@ experiment that varied only the budget.
 Generated from the field documentation in `src/config/mod.rs`; the source is authoritative
 if the two ever disagree.
 
+### Top-level keys
+
+These sit at the root of the file, before any table.
+
+`version = 2` selects the intent-oriented front-end, where `upstreams` describes *where to
+ask* and the daemon derives the transports, address families and route candidates. Omitting
+`version` selects the advanced form, where every upstream is declared in full under
+`[[upstream.groups]]`. The two are mutually exclusive: a file that used both would leave an
+operator guessing which one was in force, so combining them is a hard error.
+
+```toml
+version = 2
+upstreams = [
+    "1.1.1.1",
+    "2606:4700:4700::1111",
+    "https://cloudflare-dns.com/dns-query",
+    "tls://dns.quad9.net",
+]
+```
+
+Each entry may be a bare address (`1.1.1.1`, `1.1.1.1:5353`, `2606:4700:4700::1111`,
+`[2606:4700:4700::1111]:5353`), a provider alias (`cloudflare`, `google`, `quad9`,
+`adguard`), or a URI:
+
+| Form | Becomes | Default port |
+| --- | --- | --- |
+| bare address | Do53 over UDP, with the TCP companion RFC 7766 truncation retries need | 53 |
+| `https://host/path` | **both** an HTTP/3 and an HTTP/2 candidate for one logical DoH resolver | 443 |
+| `tls://host` | DoT | 853 |
+| `quic://host` | DoQ | 853 |
+| `udp://host`, `tcp://host` | Do53 over that transport specifically | 53 |
+
+An `https://` entry deliberately produces two route candidates rather than one. Whether
+HTTP/3 or HTTP/2 is better on a given network is a measurement, not a configuration
+choice: the scheduler ranks both from observed latency and failure history, prefers the
+better one, and falls back to the other when a path degrades — without an operator having
+to predict which will work.
+
+`http://` is refused: it has the privacy cost of DoH and none of its integrity. An
+encrypted transport pointed at a literal address is also refused, because there would be
+no name to authenticate the certificate against.
+
+A named endpoint needs bootstrap addresses before DNS works. They come from a small
+built-in provider registry (`cloudflare-dns.com`, `dns.google`, `dns.quad9.net`,
+`dns.adguard-dns.com`). The addresses are only a way to open a connection — the TLS
+identity is always the configured name, so a stale bootstrap address fails closed rather
+than quietly reaching a different resolver. For any other name, declare the server in the
+advanced `[[upstream.groups.servers]]` form with explicit `addresses`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `version` | integer | unset | Configuration format version. `2` selects the intent-oriented front-end; omitting it selects the advanced form. |
+| `upstreams` | list of endpoint URI | `[]` (empty) | Where to ask. Requires `version = 2`. |
+| `proxies` | list of proxy URI | `[]` (empty) | Reserved. **Not implemented in this release**: a non-empty list is refused rather than ignored, because a proxy that is accepted and not used would send traffic the operator believes is tunnelled straight out of the host. |
+
 ### `[server]`
 
 Inbound DNS service: listeners, access control and the foreground budget.

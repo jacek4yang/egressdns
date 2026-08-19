@@ -618,6 +618,15 @@ impl Daemon {
     /// The fragment must not specify listeners; they are bound here on ephemeral ports so
     /// tests never need a fixed port or elevated privileges.
     pub async fn start(fragment: &str) -> Self {
+        Self::start_with_prelude("", fragment).await
+    }
+
+    /// Start a daemon with `prelude` placed *before* the generated tables.
+    ///
+    /// TOML requires top-level keys to precede every table, so a `version = 2` file
+    /// cannot be expressed as a trailing fragment: `version` and `upstreams` would be
+    /// parsed as members of whichever table came last.
+    pub async fn start_with_prelude(prelude: &str, fragment: &str) -> Self {
         egressdns::tls::install_crypto_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("egressdns.toml");
@@ -640,7 +649,7 @@ path = "{}/state.sqlite3"
 "#,
             dir.path().display()
         );
-        let text = format!("{preamble}\n{fragment}\n");
+        let text = format!("{prelude}\n{preamble}\n{fragment}\n");
         std::fs::write(&config_path, &text).expect("write config");
         let config = Arc::new(
             Config::from_toml(&text, &config_path.display().to_string())

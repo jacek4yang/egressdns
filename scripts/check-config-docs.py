@@ -119,6 +119,11 @@ def documented_paths(text: str) -> set[str]:
     paths: set[str] = set()
     section: str | None = None
     for line in text[start:end].splitlines():
+        # Keys at the root of the document have no table to sit under; an explicit
+        # heading introduces them and their rows carry no prefix.
+        if line.startswith("### Top-level keys"):
+            section = ""
+            continue
         heading = HEADING_RE.match(line)
         if heading:
             section = heading.group(1)
@@ -126,7 +131,7 @@ def documented_paths(text: str) -> set[str]:
             continue
         row = ROW_RE.match(line)
         if row is not None and section is not None:
-            paths.add(f"{section}.{row.group(1)}")
+            paths.add(f"{section}.{row.group(1)}" if section else row.group(1))
     return paths
 
 

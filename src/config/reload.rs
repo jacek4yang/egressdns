@@ -255,6 +255,11 @@ const MUTATIONS: &[Mutation] = &[
 /// fails the test suite with the path named. Array elements share the array's dotted
 /// path: `upstream.groups.name` covers every `[[upstream.groups]]` entry.
 pub const RELOADABLE: &[&str] = &[
+    // The v2 front-end is expanded into `upstream.groups` at parse time, and those are
+    // themselves reloadable, so changing the endpoint list applies on the next reload.
+    "proxies",
+    "upstreams",
+    "version",
     "admin.max_request_bytes",
     "cache.failure_max_ttl",
     "cache.failure_min_ttl",
@@ -646,7 +651,11 @@ mod tests {
         let mut paths = std::collections::BTreeSet::new();
         let mut section: Option<String> = None;
         for line in text[start..end].lines() {
-            if let Some(rest) = line.strip_prefix("### `") {
+            // Keys that live at the root of the document have no table to sit under, so
+            // an explicit heading introduces them and their rows carry no prefix.
+            if line.starts_with("### Top-level keys") {
+                section = Some(String::new());
+            } else if let Some(rest) = line.strip_prefix("### `") {
                 // `[server.udp]` and `[[upstream.groups]]` both denote the dotted path.
                 let path = rest
                     .trim_start_matches('[')
@@ -657,8 +666,23 @@ mod tests {
                 paths.insert(path.to_string());
             } else if let Some(rest) = line.strip_prefix("| `") {
                 let key = rest.split('`').next().expect("row key");
+                // Only a back-ticked identifier in the first column is a key row. Tables
+                // in the prose use the same shape for illustrative values, and treating
+                // `https://host/path` as a configuration field would be nonsense. This
+                // matches the rule in scripts/check-config-docs.py.
+                if key.is_empty()
+                    || !key
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    continue;
+                }
                 let section = section.as_ref().expect("row before any section heading");
-                paths.insert(format!("{section}.{key}"));
+                if section.is_empty() {
+                    paths.insert(key.to_string());
+                } else {
+                    paths.insert(format!("{section}.{key}"));
+                }
             }
         }
         // A leaf is a path no other path extends; everything else is a table.
