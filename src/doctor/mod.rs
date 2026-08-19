@@ -151,9 +151,136 @@ pub fn run(config: &Config, config_path: &Path) -> Report {
     checks.extend(check_permissions(config, config_path));
     checks.push(check_privileged_ports(config));
     checks.push(check_address_families(config));
+    checks.extend(check_upstream_reachability(config));
     checks.push(check_systemd());
 
     Report { checks }
+}
+
+/// How long a single reachability probe may take.
+const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_500);
+
+/// Ceiling on the addresses probed, so a large configuration cannot make `doctor` slow.
+const REACH_MAX_TARGETS: usize = 24;
+
+/// Test whether the configured upstreams can actually be reached from this host.
+///
+/// This is the check that distinguishes "the resolver is broken" from "this network
+/// filters port 853". Both produce SERVFAIL on every query and identical logs; only an
+/// egress test tells them apart.
+///
+/// One reachable upstream is enough to resolve, so a single unreachable server is a
+/// warning and *every* server being unreachable is a failure.
+fn check_upstream_reachability(config: &Config) -> Vec<Check> {
+    let mut out = Vec::new();
+    let mut reachable = 0usize;
+    let mut tested = 0usize;
+    let mut unreachable: Vec<String> = Vec::new();
+    let mut untested: Vec<String> = Vec::new();
+
+    'groups: for group in &config.upstream.groups {
+        for server in group.servers.iter().filter(|s| s.enabled) {
+            let port = server.effective_port();
+            for addr in &server.addresses {
+                if tested + untested.len() >= REACH_MAX_TARGETS {
+                    break 'groups;
+                }
+                let sock = SocketAddr::new(*addr, port);
+                let label = format!("{} {}/{sock}", server.name, server.transport.label());
+                let result = match server.transport {
+                    crate::config::TransportKind::Udp => {
+                        probes::udp_dns_reachable(sock, REACH_TIMEOUT)
+                    }
+                    // DoQ and DoH3 ride QUIC. A UDP probe cannot distinguish "filtered"
+                    // from "this endpoint does not answer plain DNS", so rather than
+                    // guess, they are reported as untested.
+                    crate::config::TransportKind::Doq | crate::config::TransportKind::Doh3 => {
+                        untested.push(label);
+                        continue;
+                    }
+                    _ => probes::tcp_reachable(sock, REACH_TIMEOUT),
+                };
+                tested += 1;
+                match result {
+                    Ok(()) => reachable += 1,
+                    Err(e) => unreachable.push(format!("{label}: {e}")),
+                }
+            }
+        }
+    }
+
+    if tested == 0 {
+        out.push(Check::new(
+            "upstream.reachable",
+            "Configured upstreams are reachable",
+            Status::NotTested,
+            if untested.is_empty() {
+                String::from("no upstream address could be probed")
+            } else {
+                format!(
+                    "only QUIC-based upstreams are configured, which this check does \
+                     not probe: {}",
+                    untested.join(", ")
+                )
+            },
+        ));
+        return out;
+    }
+
+    if reachable == 0 {
+        out.push(
+            Check::new(
+                "upstream.reachable",
+                "Configured upstreams are reachable",
+                Status::Fail,
+                format!(
+                    "none of the {tested} probed upstream endpoints answered: {}",
+                    unreachable.join("; ")
+                ),
+            )
+            .with_remedy(
+                "every query will SERVFAIL. If the encrypted ports are filtered on this \
+                 network, configure an upstream whose transport is permitted here",
+            ),
+        );
+    } else if !unreachable.is_empty() {
+        out.push(
+            Check::new(
+                "upstream.reachable",
+                "Configured upstreams are reachable",
+                Status::Warning,
+                format!(
+                    "{reachable} of {tested} probed upstream endpoints answered; \
+                     unreachable: {}",
+                    unreachable.join("; ")
+                ),
+            )
+            .with_remedy(
+                "resolution still works through the reachable upstreams, but the dead \
+                 ones cost latency on every fallback",
+            ),
+        );
+    } else {
+        out.push(Check::new(
+            "upstream.reachable",
+            "Configured upstreams are reachable",
+            Status::Pass,
+            format!("all {tested} probed upstream endpoints answered"),
+        ));
+    }
+
+    if !untested.is_empty() {
+        out.push(Check::new(
+            "upstream.quic_untested",
+            "QUIC upstreams were not probed",
+            Status::NotTested,
+            format!(
+                "DoQ and DoH3 endpoints are not probed by this check: {}",
+                untested.join(", ")
+            ),
+        ));
+    }
+    out
 }
 
 fn check_config_readable(path: &Path) -> Check {
@@ -195,7 +322,17 @@ fn check_listeners(config: &Config) -> Vec<Check> {
                 Status::Pass,
                 format!("{proto}/{addr} is available"),
             ),
+            // An address held by our own running daemon is the expected state on a live
+            // host, not a conflict. Reporting it as one makes `doctor` useless for
+            // checking a deployment that is already up, which is when operators reach
+            // for it most.
             probes::PortState::InUse => match probes::owner_of(&sockets, addr, proto) {
+                Some(owner) if owner.is_egressdns() => Check::new(
+                    "listener.available",
+                    "Configured listen addresses are free",
+                    Status::Pass,
+                    format!("{proto}/{addr} is held by the running EgressDNS instance, {owner}"),
+                ),
                 Some(owner) => Check::new(
                     "listener.conflict",
                     "Configured listen addresses are free",

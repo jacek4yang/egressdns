@@ -45,8 +45,14 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# ProtectProc=invisible hides *other processes*, which is what we want. ProcSubset=pid is
+# deliberately NOT set: it hides every non-PID file in /proc, including
+# /proc/net/route and /proc/net/ipv6_route. The address-family detector reads those to
+# decide whether IPv4 and IPv6 can reach the Internet, and with them hidden it finds no
+# default route on either family, marks both unusable, and the scheduler is left with no
+# route to rank — so the daemon reports ready, satisfies its watchdog, and SERVFAILs
+# every query. Availability outranks the last few percent of /proc hardening.
 ProtectProc=invisible
-ProcSubset=pid
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true

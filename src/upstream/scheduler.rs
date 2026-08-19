@@ -300,24 +300,24 @@ impl Scheduler {
         let now = Instant::now();
         let mut scored: Vec<(f64, usize, Arc<Route>)> = Vec::with_capacity(group.routes.len());
         let mut fallback: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        let mut family_excluded: Vec<(f64, usize, Arc<Route>)> = Vec::new();
         for (idx, route) in group.routes.iter().enumerate() {
             if route.stream_companion && !include_companions {
                 continue;
             }
-            // A family with no usable path is skipped entirely; an undetermined family is
-            // still tried, because absence of measurement is not evidence of failure.
+            // A family with no usable path is set aside; an undetermined family is still
+            // tried, because absence of measurement is not evidence of failure.
             let family_ok = match route.key.addr {
                 std::net::IpAddr::V4(_) => net.v4 != FamilyState::Unusable,
                 std::net::IpAddr::V6(_) => net.v6 != FamilyState::Unusable,
             };
-            if !family_ok {
-                continue;
-            }
             let (usable, score) = route.with_health(|h| {
                 h.tick(now, &group.scheduler, seed ^ (idx as u64));
                 (h.is_usable(), h.score(route.weight))
             });
-            if usable {
+            if !family_ok {
+                family_excluded.push((score, idx, Arc::clone(route)));
+            } else if usable {
                 scored.push((score, idx, Arc::clone(route)));
             } else {
                 fallback.push((score, idx, Arc::clone(route)));
@@ -334,6 +334,23 @@ impl Scheduler {
         if scored.is_empty() && !fallback.is_empty() {
             metrics::counter!(crate::metrics::names::UPSTREAM_LAST_RESORT_TOTAL).increment(1);
             scored = fallback;
+        }
+
+        // The same argument, one level up. Address-family usability is *derived from the
+        // host routing table*, so it reports on our ability to measure the network as
+        // much as on the network itself: a sandbox that hides `/proc/net`, an unfamiliar
+        // container, a platform whose route file moved, and every family reads
+        // `Unusable` on a host whose networking is perfectly healthy. Filtering those
+        // routes out then leaves nothing to rank and turns a detection failure into a
+        // total outage — every query SERVFAILs while the daemon still reports ready.
+        //
+        // So when no family reads as usable, the filter has told us nothing we can act
+        // on, and every route is offered rather than none. A genuine single-family
+        // outage is unaffected: the working family still populates `scored`, and the
+        // dead one is still skipped.
+        if scored.is_empty() && !family_excluded.is_empty() {
+            metrics::counter!(crate::metrics::names::UPSTREAM_FAMILY_FALLBACK_TOTAL).increment(1);
+            scored = family_excluded;
         }
         scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
 

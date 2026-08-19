@@ -62,6 +62,9 @@ pub mod names {
     pub const UPSTREAM_INFLIGHT: &str = "egressdns_upstream_inflight";
     /// Queries sent to a route whose circuit was open because no alternative existed.
     pub const UPSTREAM_LAST_RESORT_TOTAL: &str = "egressdns_upstream_last_resort_total";
+    /// Queries sent to a route whose address family read as unusable because no family
+    /// read as usable at all — that is, because detection, not the network, failed.
+    pub const UPSTREAM_FAMILY_FALLBACK_TOTAL: &str = "egressdns_upstream_family_fallback_total";
     /// DNSSEC validations currently in flight.
     pub const DNSSEC_INFLIGHT: &str = "egressdns_dnssec_validations_inflight";
     /// DNSSEC validations shed because the concurrency ceiling was reached.
@@ -216,6 +219,11 @@ fn describe() {
         names::UPSTREAM_LAST_RESORT_TOTAL,
         "Queries sent to an open-circuit route because no alternative was available"
     );
+    describe_counter!(
+        names::UPSTREAM_FAMILY_FALLBACK_TOTAL,
+        "Queries sent to a route whose address family read as unusable because no family \
+         read as usable at all"
+    );
     describe_gauge!(names::UPSTREAM_INFLIGHT, "Upstream exchanges in flight");
     describe_gauge!(names::DNSSEC_INFLIGHT, "DNSSEC validations in flight");
     describe_counter!(
@@ -347,6 +355,7 @@ mod tests {
             names::UPSTREAM_SHED_TOTAL,
             names::UPSTREAM_INFLIGHT,
             names::UPSTREAM_LAST_RESORT_TOTAL,
+            names::UPSTREAM_FAMILY_FALLBACK_TOTAL,
             names::DNSSEC_INFLIGHT,
             names::DNSSEC_SHED_TOTAL,
             names::PROBE_WORKERS_ACTIVE,

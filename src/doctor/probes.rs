@@ -144,8 +144,8 @@ fn parse_proc_addr(field: &str, v6: bool) -> Option<SocketAddr> {
     }
 }
 
-/// Map socket inodes to `pid/name`, for as many processes as we may inspect.
-fn inode_owners() -> HashMap<u64, String> {
+/// Map socket inodes to `(name, pid)`, for as many processes as we may inspect.
+fn inode_owners() -> HashMap<u64, (String, u32)> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return out;
@@ -170,8 +170,7 @@ fn inode_owners() -> HashMap<u64, String> {
             };
             if let Some(rest) = text.strip_prefix("socket:[") {
                 if let Ok(inode) = rest.trim_end_matches(']').parse::<u64>() {
-                    out.entry(inode)
-                        .or_insert_with(|| format!("{comm} (pid {pid})"));
+                    out.entry(inode).or_insert_with(|| (comm.clone(), pid));
                 }
             }
         }
@@ -179,30 +178,68 @@ fn inode_owners() -> HashMap<u64, String> {
     out
 }
 
+/// Who holds a listening address.
+#[derive(Debug, Clone)]
+pub struct SocketOwner {
+    /// Process name from `/proc/<pid>/comm`, when it could be read.
+    pub comm: Option<String>,
+    /// Owning process, when it could be identified.
+    pub pid: Option<u32>,
+    /// The socket address actually held, which may be a wildcard.
+    pub addr: SocketAddr,
+    /// `"udp"` or `"tcp"`.
+    pub proto: &'static str,
+}
+
+impl fmt::Display for SocketOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.comm, self.pid) {
+            (Some(comm), Some(pid)) => {
+                write!(f, "{comm} (pid {pid}) on {}/{}", self.proto, self.addr)
+            }
+            _ => write!(f, "an unidentified process on {}/{}", self.proto, self.addr),
+        }
+    }
+}
+
+impl SocketOwner {
+    /// Whether this is an EgressDNS daemon rather than a foreign resolver.
+    pub fn is_egressdns(&self) -> bool {
+        self.comm.as_deref() == Some("egressdnsd")
+    }
+}
+
 /// Identify the process holding `addr` for `proto`, if it can be determined.
 ///
-/// A wildcard socket owns the port on every address, so an exact match is tried first and
-/// a wildcard match second.
-pub fn owner_of(sockets: &[ListeningSocket], addr: SocketAddr, proto: &str) -> Option<String> {
+/// A wildcard socket owns the port on every address *of its own family*: an
+/// `0.0.0.0:53` socket does not hold `[::]:53`, and reporting that it does turns one
+/// listener into four phantom conflicts.
+pub fn owner_of(sockets: &[ListeningSocket], addr: SocketAddr, proto: &str) -> Option<SocketOwner> {
     let matching: Vec<&ListeningSocket> = sockets
         .iter()
         .filter(|s| s.proto == proto && s.addr.port() == addr.port())
+        .filter(|s| s.addr.is_ipv4() == addr.is_ipv4())
         .filter(|s| s.addr.ip() == addr.ip() || s.addr.ip().is_unspecified())
         .collect();
-    if matching.is_empty() {
-        return None;
-    }
+    let first = matching.first()?;
     let owners = inode_owners();
     for s in &matching {
-        if let Some(name) = owners.get(&s.inode) {
-            return Some(format!("{name} on {}/{}", s.proto, s.addr));
+        if let Some((comm, pid)) = owners.get(&s.inode) {
+            return Some(SocketOwner {
+                comm: Some(comm.clone()),
+                pid: Some(*pid),
+                addr: s.addr,
+                proto: s.proto,
+            });
         }
     }
     // The socket exists but its owner is invisible — usually another user's process.
-    Some(format!(
-        "an unidentified process on {}/{}",
-        matching[0].proto, matching[0].addr
-    ))
+    Some(SocketOwner {
+        comm: None,
+        pid: None,
+        addr: first.addr,
+        proto: first.proto,
+    })
 }
 
 /// Every address currently configured on a local interface.
@@ -358,6 +395,50 @@ fn can_route(target: &str) -> bool {
     socket.connect(addr).is_ok()
 }
 
+/// Whether a TCP endpoint completes a connection inside `timeout`.
+pub fn tcp_reachable(addr: SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
+    match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Whether a Do53 endpoint answers a real query inside `timeout`.
+///
+/// A UDP `connect` proves only that a route exists, so this sends an actual DNS query and
+/// waits for a reply: on a filtered path the route is fine and the answer never comes,
+/// which is exactly the case worth reporting.
+pub fn udp_dns_reachable(addr: SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
+    let bind = if addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = std::net::UdpSocket::bind(bind).map_err(|e| e.to_string())?;
+    socket
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    socket.connect(addr).map_err(|e| e.to_string())?;
+
+    // A minimal query for the root NS: 12-byte header, QNAME ".", QTYPE NS, QCLASS IN.
+    let query: [u8; 17] = [
+        0x5a, 0x5a, // transaction id
+        0x01, 0x00, // recursion desired
+        0x00, 0x01, // one question
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no answer, authority, additional
+        0x00, // root name
+        0x00, 0x02, // QTYPE NS
+        0x00, 0x01, // QCLASS IN
+    ];
+    socket.send(&query).map_err(|e| e.to_string())?;
+    let mut buf = [0u8; 512];
+    match socket.recv(&mut buf) {
+        Ok(n) if n >= 12 && buf[0] == 0x5a && buf[1] == 0x5a => Ok(()),
+        Ok(_) => Err(String::from("reply did not match the query")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// The systemd state of a unit, or `None` when systemd is not available.
 ///
 /// `LoadState` is consulted first and `ActiveState` only afterwards, because
@@ -441,6 +522,97 @@ mod tests {
         }
         let state = systemd_unit_state("egressdns-doctor-nonexistent-unit.service");
         assert_eq!(state.as_deref(), Some("not-found"));
+    }
+
+    fn socket(addr: &str, proto: &'static str) -> ListeningSocket {
+        ListeningSocket {
+            addr: addr.parse().expect("literal"),
+            proto,
+            inode: 0,
+        }
+    }
+
+    /// A wildcard socket owns its own family's addresses and nothing else.
+    ///
+    /// Treating an `0.0.0.0:53` listener as the owner of `[::]:53` turned a single
+    /// healthy listener into four phantom conflicts on a dual-stack host.
+    #[test]
+    fn a_v4_wildcard_socket_does_not_own_a_v6_address() {
+        let sockets = vec![socket("0.0.0.0:53", "udp")];
+        assert!(
+            owner_of(&sockets, "0.0.0.0:53".parse().expect("literal"), "udp").is_some(),
+            "the v4 wildcard owns v4"
+        );
+        assert!(
+            owner_of(&sockets, "192.0.2.1:53".parse().expect("literal"), "udp").is_some(),
+            "the v4 wildcard owns every v4 address"
+        );
+        assert!(
+            owner_of(&sockets, "[::]:53".parse().expect("literal"), "udp").is_none(),
+            "the v4 wildcard must not own a v6 address"
+        );
+    }
+
+    #[test]
+    fn a_socket_on_another_port_or_protocol_is_not_an_owner() {
+        let sockets = vec![socket("0.0.0.0:53", "udp")];
+        assert!(owner_of(&sockets, "0.0.0.0:5353".parse().expect("literal"), "udp").is_none());
+        assert!(owner_of(&sockets, "0.0.0.0:53".parse().expect("literal"), "tcp").is_none());
+    }
+
+    /// Our own daemon must be distinguishable from a foreign resolver, so a live host
+    /// does not report its own healthy listeners as conflicts.
+    #[test]
+    fn our_own_daemon_is_recognised_as_such() {
+        let ours = SocketOwner {
+            comm: Some(String::from("egressdnsd")),
+            pid: Some(1),
+            addr: "0.0.0.0:53".parse().expect("literal"),
+            proto: "udp",
+        };
+        let theirs = SocketOwner {
+            comm: Some(String::from("systemd-resolve")),
+            pid: Some(2),
+            addr: "127.0.0.53:53".parse().expect("literal"),
+            proto: "udp",
+        };
+        assert!(ours.is_egressdns());
+        assert!(!theirs.is_egressdns());
+        assert!(theirs.to_string().contains("systemd-resolve"));
+        assert!(theirs.to_string().contains("pid 2"));
+    }
+
+    #[test]
+    fn tcp_reachability_distinguishes_a_listener_from_a_closed_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        assert!(tcp_reachable(addr, std::time::Duration::from_millis(500)).is_ok());
+        drop(listener);
+        assert!(tcp_reachable(addr, std::time::Duration::from_millis(500)).is_err());
+    }
+
+    /// A Do53 probe must require an *answer*, not merely a route.
+    #[test]
+    fn udp_reachability_requires_a_matching_reply() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = server.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            if let Ok((n, peer)) = server.recv_from(&mut buf) {
+                // Echo the transaction id back with the response bit set.
+                let mut reply = buf[..n].to_vec();
+                reply[2] |= 0x80;
+                let _ = server.send_to(&reply, peer);
+            }
+        });
+        assert!(udp_dns_reachable(addr, std::time::Duration::from_secs(2)).is_ok());
+        let _ = handle.join();
+
+        // A socket bound but never answering must read as unreachable, not reachable:
+        // this is the filtered-path case the check exists for.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let silent_addr = silent.local_addr().expect("addr");
+        assert!(udp_dns_reachable(silent_addr, std::time::Duration::from_millis(300)).is_err());
     }
 
     #[test]
