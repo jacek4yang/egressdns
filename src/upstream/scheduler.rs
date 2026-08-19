@@ -132,6 +132,14 @@ fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+/// How long a cancelled-but-sent exchange keeps its accounting slot.
+///
+/// Long enough to cover a plausible round trip for a datagram that is genuinely still on
+/// the wire, short enough that a losing hedge cannot throttle admission of new work. Also
+/// clamped by the attempt's own terminal instant, so it never outlives the timeout that
+/// was already charged against the foreground deadline.
+const CANCELLED_EXCHANGE_GRACE: Duration = Duration::from_millis(100);
+
 /// Retains a physical-exchange permit until the exchange is terminal.
 ///
 /// A datagram that has been sent stays on the wire whether or not the local future that
@@ -141,9 +149,22 @@ fn remaining(deadline: Instant) -> Duration {
 /// claims to bound. So a cancelled-but-sent exchange keeps its slot until the point at
 /// which it could no longer produce a response.
 ///
-/// The retention is bounded by the attempt's own send timeout, and only a cancelled
-/// exchange pays for it: an exchange that completes locally releases its slot inline,
-/// which is the overwhelmingly common case and stays free of any spawn.
+/// Only a cancelled exchange pays for this: one that completes locally releases its slot
+/// inline, which is the overwhelmingly common case and stays free of any spawn.
+///
+/// The retention window is [`CANCELLED_EXCHANGE_GRACE`], not the attempt's whole
+/// remaining timeout. Holding the slot for the full timeout was measured to be
+/// catastrophic: on the load harness it took the truncation scenario from 15,285 queries
+/// per second at 100% success to 1,187 at **0%**, and the miss-heavy scenario from 100%
+/// to 85%. A losing hedge would hold a slot for up to `query_timeout` after its
+/// resolution had already answered the client, so completed past work throttled admission
+/// of new work until the pool was exhausted.
+///
+/// A short window is also the more honest model. Once the future is dropped the socket is
+/// closed and the kernel discards anything that arrives, so the only interval in which the
+/// exchange is meaningfully "on the wire" is about one round trip — not one timeout. The
+/// grace keeps the ceiling counting exchanges rather than waiters without letting it count
+/// exchanges that are over.
 struct ExchangeGuard {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// The instant after which this exchange can no longer produce a response.
@@ -174,7 +195,10 @@ impl Drop for ExchangeGuard {
         if self.completed {
             return;
         }
-        let wait = self.terminal.saturating_duration_since(Instant::now());
+        let wait = self
+            .terminal
+            .saturating_duration_since(Instant::now())
+            .min(CANCELLED_EXCHANGE_GRACE);
         if wait.is_zero() {
             return;
         }
