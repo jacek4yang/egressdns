@@ -94,6 +94,17 @@ do
 done
 
 info "secrets and absolute paths"
+# A --full run compiles the whole workspace and links every test binary inside this
+# directory. On a distribution whose /tmp is a RAM-backed tmpfs that competes with the
+# linker for memory, and the failure it produces is "ld terminated with signal 7 [Bus
+# error]" — which reads like a compiler bug rather than a full disk. Prefer a
+# disk-backed directory beside the archive when the caller has not chosen one.
+if [ "${FULL:-0}" = "1" ] && [ -z "${TMPDIR:-}" ] &&
+    [ "$(stat -f -c %T /tmp 2>/dev/null || echo unknown)" = "tmpfs" ]; then
+    TMPDIR="$(cd "$(dirname "$archive")" && pwd)"
+    export TMPDIR
+    info "using $TMPDIR for the build: /tmp is a tmpfs and --full needs real disk"
+fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 tar -xzf "$archive" -C "$work"
