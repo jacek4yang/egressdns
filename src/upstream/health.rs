@@ -414,6 +414,28 @@ impl RouteHealth {
     }
 
     /// Expected cost of using this route, in milliseconds. Lower is better.
+    /// Whether this route has any latency evidence at all.
+    ///
+    /// Ranking needs this because an unmeasured route cannot be scored on the same
+    /// absolute scale as a measured one: see [`Self::score`].
+    pub fn is_measured(&self) -> bool {
+        self.window_len > 0
+    }
+
+    /// Static component of the score, kept out of the neutral prior so that operator
+    /// weight still orders routes that have no measurements.
+    pub fn weight_bias(weight: u32) -> f64 {
+        100.0 / f64::from(weight.max(1))
+    }
+
+    /// Expected cost of using this route, in milliseconds. Lower is better.
+    ///
+    /// For a route with no measurements this returns an *absolute* prior, which is only
+    /// meaningful when nothing else has been measured either. `rank` replaces it with a
+    /// prior derived from the routes that have been measured, because an absolute prior
+    /// is a claim about the network that we have no evidence for — and on a network
+    /// slower than the prior assumes, it makes every unmeasured route outrank every
+    /// proven one.
     pub fn score(&self, weight: u32) -> f64 {
         let base = if self.window_len == 0 {
             // Unknown routes get an optimistic-but-not-free estimate so that a fresh route

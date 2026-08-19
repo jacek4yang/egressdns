@@ -298,9 +298,27 @@ impl Scheduler {
     ) -> Vec<Arc<Route>> {
         let net = self.network.load();
         let now = Instant::now();
-        let mut scored: Vec<(f64, usize, Arc<Route>)> = Vec::with_capacity(group.routes.len());
-        let mut fallback: Vec<(f64, usize, Arc<Route>)> = Vec::new();
-        let mut family_excluded: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        /// One candidate mid-ranking.
+        struct Candidate {
+            score: f64,
+            idx: usize,
+            route: Arc<Route>,
+            /// Whether `score` is real evidence or the absolute cold-start prior.
+            measured: bool,
+            /// Which bucket the route belongs to.
+            bucket: Bucket,
+        }
+        #[derive(PartialEq)]
+        enum Bucket {
+            /// Usable family, healthy circuit.
+            Ready,
+            /// Usable family, open circuit.
+            Degraded,
+            /// Family reads as unusable.
+            FamilyExcluded,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(group.routes.len());
         for (idx, route) in group.routes.iter().enumerate() {
             if route.stream_companion && !include_companions {
                 continue;
@@ -311,16 +329,69 @@ impl Scheduler {
                 std::net::IpAddr::V4(_) => net.v4 != FamilyState::Unusable,
                 std::net::IpAddr::V6(_) => net.v6 != FamilyState::Unusable,
             };
-            let (usable, score) = route.with_health(|h| {
+            let (usable, score, measured) = route.with_health(|h| {
                 h.tick(now, &group.scheduler, seed ^ (idx as u64));
-                (h.is_usable(), h.score(route.weight))
+                (h.is_usable(), h.score(route.weight), h.is_measured())
             });
-            if !family_ok {
-                family_excluded.push((score, idx, Arc::clone(route)));
+            let bucket = if !family_ok {
+                Bucket::FamilyExcluded
             } else if usable {
-                scored.push((score, idx, Arc::clone(route)));
+                Bucket::Ready
             } else {
-                fallback.push((score, idx, Arc::clone(route)));
+                Bucket::Degraded
+            };
+            candidates.push(Candidate {
+                score,
+                idx,
+                route: Arc::clone(route),
+                measured,
+                bucket,
+            });
+        }
+
+        // Re-price the routes that have no measurements.
+        //
+        // `score` has to return *something* for a route nobody has used, and any absolute
+        // number is a claim about the network. Pick it too low and every unmeasured route
+        // outranks every proven one — permanently, because the moment a route is measured
+        // it acquires a real latency and drops back behind the untried ones. On a network
+        // whose real round trip exceeds the prior, that is a scheduler that never
+        // converges: it cycles through its whole route list forever, preferring whichever
+        // routes it knows least about, and a configuration listing several unreachable
+        // endpoints then fails to resolve anything at all. It is invisible on loopback,
+        // where the real round trip is far below any sane prior, and unmissable at 250ms.
+        //
+        // So the prior is taken from evidence instead: an unmeasured route is priced at
+        // the median of the routes that *have* been measured. "Unknown" then means
+        // "typical" — better than the worst proven route, worse than the best, and still
+        // reached by ordinary exploration. Absence of evidence stays neutral without
+        // becoming an advantage. With nothing measured at all, every route keeps its
+        // absolute prior and they tie, which is the right answer for a cold start.
+        let mut measured_scores: Vec<f64> = candidates
+            .iter()
+            .filter(|c| c.measured)
+            .map(|c| c.score)
+            .collect();
+        if !measured_scores.is_empty() {
+            measured_scores.sort_by(|a, b| a.total_cmp(b));
+            let median = measured_scores[measured_scores.len() / 2];
+            for c in candidates.iter_mut().filter(|c| !c.measured) {
+                // The weight bias is re-applied on top of the neutral prior so that an
+                // operator's preference still orders routes nobody has measured.
+                c.score =
+                    median + crate::upstream::health::RouteHealth::weight_bias(c.route.weight);
+            }
+        }
+
+        let mut scored: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        let mut fallback: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        let mut family_excluded: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        for c in candidates {
+            let entry = (c.score, c.idx, c.route);
+            match c.bucket {
+                Bucket::Ready => scored.push(entry),
+                Bucket::Degraded => fallback.push(entry),
+                Bucket::FamilyExcluded => family_excluded.push(entry),
             }
         }
 
@@ -877,6 +948,153 @@ fn validate_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        SchedulerConfig, TransportKind, UpstreamConfig, UpstreamGroupConfig, UpstreamServerConfig,
+        UpstreamTlsConfig,
+    };
+
+    fn test_group(count: usize) -> (Arc<UpstreamRegistry>, Arc<UpstreamGroup>) {
+        crate::tls::install_crypto_provider();
+        let servers: Vec<UpstreamServerConfig> = (0..count)
+            .map(|i| UpstreamServerConfig {
+                name: format!("s{i}"),
+                transport: TransportKind::Udp,
+                addresses: vec![format!("9.9.9.{}", i + 1).parse().expect("ip")],
+                ..UpstreamServerConfig::default()
+            })
+            .collect();
+        let cfg = UpstreamConfig {
+            default_group: "default".into(),
+            groups: vec![UpstreamGroupConfig {
+                name: "default".into(),
+                servers,
+                scheduler: SchedulerConfig {
+                    // Exploration is deliberately off: this asserts the ordering the
+                    // score produces, not the exploration that perturbs it.
+                    explore_rate: 0.0,
+                    ..SchedulerConfig::default()
+                },
+            }],
+            tls: UpstreamTlsConfig::default(),
+        };
+        let roots = Arc::new(crate::tls::root_store(false, &[]).expect("roots"));
+        let registry = Arc::new(
+            UpstreamRegistry::build(&cfg, roots, Duration::from_secs(2), 1232).expect("registry"),
+        );
+        let group = registry.default_group().expect("group");
+        (registry, group)
+    }
+
+    fn scheduler(registry: Arc<UpstreamRegistry>) -> Scheduler {
+        Scheduler::new(
+            registry,
+            Arc::new(crate::network::NetworkState::new()),
+            Arc::new(Semaphore::new(64)),
+            Duration::ZERO,
+        )
+    }
+
+    /// A route that has been measured and works must not be displaced by routes nobody
+    /// has tried.
+    ///
+    /// This is the shape of a real failure: on a network whose round trip is 250ms, the
+    /// absolute cold-start prior scored *better* than any measured route, so the winner
+    /// of every query was whichever route had the least evidence. With several
+    /// unreachable endpoints configured, the scheduler cycled through them forever and
+    /// resolution never converged. Loopback hides it completely, because a sub-millisecond
+    /// round trip always beats the prior.
+    #[tokio::test]
+    async fn a_proven_route_outranks_routes_that_have_never_been_tried() {
+        let (registry, group) = test_group(6);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        // The first route works, at a latency typical of a real Internet path.
+        let proven = Arc::clone(&group.routes[0]);
+        for _ in 0..3 {
+            proven.with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(250)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_eq!(
+            ranked[0].key,
+            proven.key,
+            "a route measured working at 250ms must rank ahead of untried routes; \
+             ranked order was {:?}",
+            ranked.iter().map(|r| r.key.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The converse: a route measured as *bad* must fall behind untried routes, so that
+    /// alternatives still get their turn.
+    #[tokio::test]
+    async fn a_failing_route_falls_behind_routes_that_have_never_been_tried() {
+        let (registry, group) = test_group(6);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        let bad = Arc::clone(&group.routes[0]);
+        for _ in 0..4 {
+            bad.with_health(|h| h.record(AttemptOutcome::Timeout, None, Instant::now(), cfg));
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_ne!(
+            ranked[0].key, bad.key,
+            "a route that keeps timing out must not stay first"
+        );
+    }
+
+    /// With nothing measured at all, every route ties and configuration order decides.
+    /// That is the correct cold start: no route has earned a preference.
+    #[tokio::test]
+    async fn a_cold_group_ranks_in_configuration_order() {
+        let (registry, group) = test_group(4);
+        let sched = scheduler(registry);
+        let ranked = sched.rank(&group, 0);
+        let addrs: Vec<String> = ranked.iter().map(|r| r.key.addr.to_string()).collect();
+        assert_eq!(addrs, vec!["9.9.9.1", "9.9.9.2", "9.9.9.3", "9.9.9.4"]);
+    }
+
+    /// A faster proven route must outrank a slower proven route.
+    #[tokio::test]
+    async fn between_two_measured_routes_the_faster_one_wins() {
+        let (registry, group) = test_group(3);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        for _ in 0..3 {
+            group.routes[2].with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(20)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+            group.routes[0].with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(400)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_eq!(
+            ranked[0].key, group.routes[2].key,
+            "the 20ms route must beat the 400ms route"
+        );
+    }
 
     #[test]
     fn hedge_budget_enforces_the_fraction() {
