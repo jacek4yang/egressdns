@@ -1,22 +1,15 @@
 # Releasing
 
-## What must be substituted first
+## Repository identity
 
-This repository does not name a real GitHub repository anywhere, and no placeholder is a
-guess at one. Before a first release, replace every occurrence of `<OWNER>` and `<REPO>`:
+The official repository is [`jacek4yang/egressdns`](https://github.com/jacek4yang/egressdns),
+and that identity is hard-coded throughout the tree: `Cargo.toml` (`repository`,
+`homepage`), `README.md`, `install.sh` and `upgrade.sh` (default `--repo`),
+`scripts/publish-first-release.sh`, `docs/OPERATIONS.md`, and the packaging metadata in
+`packaging/`. There is nothing to substitute before a release.
 
-| Location | Placeholder | What to put there |
-| --- | --- | --- |
-| `README.md`, *Publishing a release* | `<OWNER>/<REPO>` | Your repository |
-| `install.sh --repo`, `upgrade.sh --repo` | `<OWNER>/egressdns` in the usage text | Your repository |
-| `scripts/publish-first-release.sh` | first argument | Your repository |
-
-```sh
-grep -rn '<OWNER>\|<REPO>' --exclude-dir=target --exclude-dir=.git .
-```
-
-Nothing else needs editing. `.github/workflows/release.yml` derives the repository from
-`GITHUB_REPOSITORY` at run time, so it works wherever it is pushed.
+`.github/workflows/release.yml` derives the repository from `GITHUB_REPOSITORY` at run
+time, so it also works unchanged on a fork.
 
 ## Preconditions
 
@@ -78,15 +71,15 @@ The tag push triggers `.github/workflows/release.yml`, which:
 No third-party action runs in that workflow. `gh` is preinstalled on the runner, so the
 token is never handed to code outside GitHub's own tooling.
 
-`scripts/publish-first-release.sh <OWNER>/<REPO>` does the first push with pre-flight
-checks: it refuses a dirty tree and never force-pushes.
+`scripts/publish-first-release.sh` does the first push with pre-flight checks: it refuses
+a dirty tree and never force-pushes.
 
 ## Verifying a published release
 
 From a clean machine, as a user would:
 
 ```sh
-gh release download v1.2.3 --repo <OWNER>/<REPO>
+gh release download v1.2.3 --repo jacek4yang/egressdns
 sha256sum -c SHA256SUMS --ignore-missing
 tar -tzf egressdns-v1.2.3-linux-x86_64.tar.gz | head
 ./egressdns/egressdnsd --version
@@ -99,7 +92,7 @@ version, and anyone who already downloaded the first one has no way to find out.
 the release, delete the tag, and publish the next patch version instead:
 
 ```sh
-gh release delete v1.2.3 --repo <OWNER>/<REPO> --yes
+gh release delete v1.2.3 --repo jacek4yang/egressdns --yes
 git push --delete origin v1.2.3
 git tag -d v1.2.3
 ```

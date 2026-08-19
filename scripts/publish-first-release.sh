@@ -2,7 +2,10 @@
 #
 # Publish the first EgressDNS release to GitHub.
 #
-#   ./scripts/publish-first-release.sh <OWNER>/<REPO>
+#   ./scripts/publish-first-release.sh [owner/repo]
+#
+# Defaults to the official repository, jacek4yang/egressdns; the optional argument
+# overrides it (for testing forks).
 #
 # Requires an authenticated `gh` CLI. The script pushes `main`, creates and pushes the
 # v1.0.0 tag, and then shows the Actions run that builds the release assets.
@@ -16,8 +19,7 @@ readonly TAG="v1.0.0"
 log()  { printf '[release] %s\n' "$*" >&2; }
 die()  { printf '[release] error: %s\n' "$*" >&2; exit 1; }
 
-[ "$#" -eq 1 ] || die "usage: $0 <OWNER>/<REPO>"
-REPO="$1"
+REPO="${1:-jacek4yang/egressdns}"
 printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' ||
     die "repository '$REPO' is not in <owner>/<name> form"
 
@@ -72,6 +74,12 @@ log "waiting for the release workflow to appear"
 sleep 5
 gh run list --repo "$REPO" --workflow release.yml --limit 5 || true
 
+if [ "$REPO" = "jacek4yang/egressdns" ]; then
+    install_hint="curl -fsSL \"https://raw.githubusercontent.com/${REPO}/main/install.sh\" | sudo bash"
+else
+    install_hint="curl -fsSL \"https://raw.githubusercontent.com/${REPO}/main/install.sh\" | sudo bash -s -- --repo \"${REPO}\""
+fi
+
 cat >&2 <<MSG
 
 The tag has been pushed. GitHub Actions is now building:
@@ -86,7 +94,6 @@ Watch it with:
 
 Once the release is published, the one-command installer works:
 
-  curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/install.sh" \\
-    | sudo bash -s -- --repo "${REPO}"
+  ${install_hint}
 
 MSG

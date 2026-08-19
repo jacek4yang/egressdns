@@ -64,28 +64,27 @@ any configuration. The reasoning for each is in [`docs/adr/`](docs/adr/).
 One command, from a GitHub release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<OWNER>/<REPO>/main/install.sh \
-  | sudo bash -s -- --repo <OWNER>/<REPO>
+curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh | sudo bash
 ```
 
 Pin a version, and stage it without starting the service:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<OWNER>/<REPO>/main/install.sh \
-  | sudo bash -s -- --repo <OWNER>/<REPO> --version v1.0.0 --no-start
+curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh \
+  | sudo bash -s -- --version v1.0.0 --no-start
 ```
 
 The installer detects the architecture, downloads the matching tarball, verifies its
 SHA-256 against the published `SHA256SUMS`, creates a system user, installs the systemd
 unit, and refuses to continue if something else already owns port 53 — it will not
 silently disable your existing resolver. It snapshots the previous binary, unit and config
-to `/var/backups/egressdns/<timestamp>/` and rolls back automatically if the new version
-fails its health check.
+to a temporary backup directory under `$TMPDIR` (the exact path is printed in the install
+log) and rolls back automatically if the new version fails its health check.
 
 Upgrade and uninstall are separate scripts with the same conventions:
 
 ```sh
-sudo /usr/local/lib/egressdns/upgrade.sh --repo <OWNER>/<REPO>
+sudo /usr/local/lib/egressdns/upgrade.sh
 sudo /usr/local/lib/egressdns/uninstall.sh --purge
 ```
 
@@ -156,28 +155,23 @@ query names and client addresses are never used as labels.
 | [`STATUS.md`](STATUS.md) | Every claim marked measured, tested, structural, static or unverified. |
 | [`docs/adr/`](docs/adr/) | Ten decisions that would be expensive to reverse, and why. |
 
-## Publishing a release
+## Releases
 
-The repository is not published anywhere by default. To put it on GitHub for the first
-time:
+The official repository is [`jacek4yang/egressdns`](https://github.com/jacek4yang/egressdns):
 
 ```sh
-gh repo create <OWNER>/<REPO> --private --source=. --remote=origin
-git push -u origin main
-git tag -a v1.0.0 -m "EgressDNS v1.0.0"
-git push origin v1.0.0
+git clone https://github.com/jacek4yang/egressdns
 ```
 
-Replace `<OWNER>/<REPO>` with your own. Nothing in this repository names a real repository,
-and no placeholder is a guess at one — see [`docs/RELEASING.md`](docs/RELEASING.md) for the
-complete list of things that must be substituted before a first release.
+Report issues at <https://github.com/jacek4yang/egressdns/issues>; download release
+archives and `SHA256SUMS` from <https://github.com/jacek4yang/egressdns/releases>.
 
-Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds x86_64 and
-aarch64 tarballs, generates `SHA256SUMS`, and attaches them to the release. The one-command
-installer above works as soon as that run completes.
-
-`scripts/publish-first-release.sh <owner>/<repo>` does the same thing with pre-flight
-checks: it refuses a dirty tree, never force-pushes, and shows you the Actions run.
+Releases are built by pushing a `v*` tag: `.github/workflows/release.yml` builds x86_64
+and aarch64 tarballs, generates `SHA256SUMS`, and attaches them to the release. The
+one-command installer above works against every published release. See
+[`docs/RELEASING.md`](docs/RELEASING.md) for the full maintainer procedure;
+`scripts/publish-first-release.sh` does the first push with pre-flight checks: it refuses
+a dirty tree, never force-pushes, and shows you the Actions run.
 
 ## Development
 

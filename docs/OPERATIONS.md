@@ -457,20 +457,27 @@ dig @<address> example.com A +short            # confirm before walking away
 ```sh
 sudo /usr/local/lib/egressdns/upgrade.sh --version v0.9.0   # previous release
 # or, from the installer:
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
-  | sudo bash -s -- --repo <owner>/<repo> --version v0.9.0
+curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh \
+  | sudo bash -s -- --version v0.9.0
 ```
 
-`install.sh` and `upgrade.sh` snapshot the binary, the unit and `config.toml` into
-`/var/backups/egressdns/<timestamp>/` before touching anything, and restore that snapshot
-automatically if the new version fails its post-install health check. To restore by hand:
+`install.sh` snapshots the binary, the unit and `config.toml` into a temporary backup
+directory under `$TMPDIR` before touching anything — the exact path is printed in the
+install log — and restores that snapshot automatically if the new version fails its
+post-install health check. `upgrade.sh` additionally keeps a persistent snapshot in
+`/var/lib/egressdns/rollback/`; restore it at any time with:
 
 ```sh
-ls /var/backups/egressdns/
+sudo /usr/local/lib/egressdns/upgrade.sh --rollback
+```
+
+To restore the installer's snapshot by hand, use the backup path from the install log:
+
+```sh
 sudo systemctl stop egressdns
-sudo install -m 0755 /var/backups/egressdns/<ts>/egressdnsd /usr/local/bin/egressdnsd
+sudo install -m 0755 <backup-dir>/egressdnsd /usr/local/bin/egressdnsd
 sudo setcap 'cap_net_bind_service=+ep' /usr/local/bin/egressdnsd
-sudo install -m 0640 /var/backups/egressdns/<ts>/config.toml /etc/egressdns/config.toml
+sudo install -m 0640 <backup-dir>/config.toml /etc/egressdns/config.toml
 sudo systemctl start egressdns
 ```
 

@@ -3,12 +3,12 @@
 # EgressDNS installer.
 #
 # Remote install (latest release):
-#   curl -fsSL "https://raw.githubusercontent.com/<OWNER>/egressdns/main/install.sh" \
-#     | sudo bash -s -- --repo "<OWNER>/egressdns"
+#   curl -fsSL "https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh" \
+#     | sudo bash
 #
 # Remote install (pinned version):
-#   curl -fsSL "https://raw.githubusercontent.com/<OWNER>/egressdns/main/install.sh" \
-#     | sudo bash -s -- --repo "<OWNER>/egressdns" --version "v1.0.0"
+#   curl -fsSL "https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh" \
+#     | sudo bash -s -- --version "v1.0.0"
 #
 # Local install from an extracted source archive:
 #   sudo ./install.sh --local-build
@@ -28,7 +28,7 @@ readonly RUN_DIR="/run/egressdns"
 readonly UNIT_PATH="/etc/systemd/system/egressdns.service"
 readonly SERVICE_USER="egressdns"
 
-REPO=""
+REPO="jacek4yang/egressdns"
 VERSION="latest"
 CONFIG_SOURCE=""
 LOCAL_BUILD=0
@@ -47,7 +47,9 @@ usage() {
     cat <<'USAGE'
 Usage: install.sh [options]
 
-  --repo <owner/name>   GitHub repository to download release assets from.
+  --repo <owner/name>   GitHub repository to download release assets from
+                        (default: jacek4yang/egressdns). Advanced override,
+                        intended for development and testing forks.
   --version <tag>       Release tag to install (default: latest).
   --config <path>       Configuration file to install when none exists yet.
   --local-build         Build from the current source tree instead of downloading.
@@ -74,9 +76,6 @@ parse_args() {
             *)              die "unknown option '$1' (try --help)" ;;
         esac
     done
-    if [ "$LOCAL_BUILD" -eq 0 ] && [ -z "$REPO" ]; then
-        die "either --repo <owner/name> or --local-build is required"
-    fi
     if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
         die "repository '$REPO' is not in <owner>/<name> form"
     fi

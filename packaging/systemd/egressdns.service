@@ -1,6 +1,6 @@
 [Unit]
 Description=EgressDNS adaptive caching DNS forwarder
-Documentation=https://github.com/OWNER/egressdns
+Documentation=https://github.com/jacek4yang/egressdns
 After=network-online.target
 Wants=network-online.target
 # Refuse to start if something else already owns port 53.

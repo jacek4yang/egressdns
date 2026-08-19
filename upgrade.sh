@@ -2,10 +2,11 @@
 #
 # EgressDNS upgrade and rollback helper.
 #
-#   sudo ./upgrade.sh --repo <OWNER>/egressdns              # upgrade to the latest release
-#   sudo ./upgrade.sh --repo <OWNER>/egressdns --version v1.0.1
-#   sudo ./upgrade.sh --local-build                          # upgrade from the source tree
-#   sudo ./upgrade.sh --rollback                             # restore the previous binaries
+#   sudo ./upgrade.sh [--version v1.0.1]                 # upgrade from the official repo
+#                                                          (jacek4yang/egressdns)
+#   sudo ./upgrade.sh --repo <owner>/<name>              # upgrade from a fork (advanced)
+#   sudo ./upgrade.sh --local-build                      # upgrade from the source tree
+#   sudo ./upgrade.sh --rollback                         # restore the previous binaries
 #
 # An upgrade keeps your configuration untouched, snapshots the current binaries, and
 # restores them automatically if the new version fails to start or fails its health check.
@@ -27,7 +28,9 @@ usage() {
     cat <<'USAGE'
 Usage: upgrade.sh [options]
 
-  --repo <owner/name>   GitHub repository to download release assets from.
+  --repo <owner/name>   GitHub repository to download release assets from
+                        (default: jacek4yang/egressdns). Advanced override,
+                        intended for development and testing forks.
   --version <tag>       Release tag to install (default: latest).
   --local-build         Build from the current source tree instead of downloading.
   --rollback            Restore the snapshot taken by the previous upgrade and exit.
@@ -35,7 +38,7 @@ Usage: upgrade.sh [options]
 USAGE
 }
 
-REPO=""
+REPO="jacek4yang/egressdns"
 VERSION="latest"
 LOCAL_BUILD=0
 ROLLBACK=0
@@ -124,7 +127,6 @@ args=()
 if [ "$LOCAL_BUILD" -eq 1 ]; then
     args+=(--local-build)
 else
-    [ -n "$REPO" ] || die "either --repo <owner/name> or --local-build is required"
     args+=(--repo "$REPO" --version "$VERSION")
 fi
 

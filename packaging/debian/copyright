@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: egressdns
 Upstream-Contact: EgressDNS maintainers <egressdns@example.invalid>
-Source: https://github.com/OWNER/egressdns
+Source: https://github.com/jacek4yang/egressdns
 
 Files: *
 Copyright: 2026 EgressDNS contributors

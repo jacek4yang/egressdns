@@ -8,7 +8,7 @@ Build-Depends: debhelper-compat (= 13),
                pkg-config
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
-Homepage: https://github.com/OWNER/egressdns
+Homepage: https://github.com/jacek4yang/egressdns
 
 Package: egressdns
 Architecture: amd64 arm64
