@@ -246,6 +246,204 @@ const MUTATIONS: &[Mutation] = &[
     |c| c.logging.json = !c.logging.json,
 ];
 
+/// Every configuration leaf path that applies on reload, in full dotted form.
+///
+/// The reload contract partitions the configuration into exactly two sets: the paths
+/// reported by [`catalog`] (restart-required) and the paths listed here. The test
+/// `every_config_path_is_classified_exactly_once` proves the partition covers every leaf
+/// path exactly once, so a field added to `src/config/mod.rs` without a classification
+/// fails the test suite with the path named. Array elements share the array's dotted
+/// path: `upstream.groups.name` covers every `[[upstream.groups]]` entry.
+pub const RELOADABLE: &[&str] = &[
+    "admin.max_request_bytes",
+    "cache.failure_max_ttl",
+    "cache.failure_min_ttl",
+    "cache.negative_max_ttl",
+    "cloudflare.allow_domains",
+    "cloudflare.augment.max_added",
+    "cloudflare.augment.min_advantage",
+    "cloudflare.augment.min_samples",
+    "cloudflare.augment.min_validations",
+    "cloudflare.augment.validation_ttl",
+    "cloudflare.deny_domains",
+    "cloudflare.enabled",
+    "cloudflare.mode",
+    "cloudflare.official.api_token_env",
+    "cloudflare.official.api_token_file",
+    "cloudflare.official.api_url",
+    "cloudflare.official.cache_file",
+    "cloudflare.official.ipv4_url",
+    "cloudflare.official.ipv6_url",
+    "cloudflare.official.max_response_bytes",
+    "cloudflare.official.min_ipv4_prefixes",
+    "cloudflare.official.min_ipv6_prefixes",
+    "cloudflare.official.refresh_interval",
+    "cloudflare.official.timeout",
+    "cloudflare.probe_hosts",
+    "cloudflare.sampling.addresses_per_round",
+    "cloudflare.sampling.enabled",
+    "cloudflare.sampling.max_new_candidates_per_hour",
+    "cloudflare.sampling.round_interval",
+    "cloudflare.seeds.enabled",
+    "cloudflare.seeds.endpoints.enabled",
+    "cloudflare.seeds.endpoints.name",
+    "cloudflare.seeds.endpoints.url",
+    "cloudflare.seeds.max_addresses_per_response",
+    "cloudflare.seeds.max_response_bytes",
+    "cloudflare.seeds.refresh_interval",
+    "cloudflare.seeds.resolve_hostnames",
+    "cloudflare.seeds.timeout",
+    "cloudflare.static_candidates",
+    "datasets.asn_mmdb",
+    "datasets.domain_category_files",
+    "datasets.geoip_mmdb",
+    "datasets.hosts_files",
+    "datasets.max_file_bytes",
+    "datasets.max_records",
+    "datasets.reload_interval",
+    "dnssec.extended_errors",
+    "dnssec.max_validation_depth",
+    "dnssec.mode",
+    "dnssec.trust_anchor_file",
+    "dnssec.trust_upstream_ad",
+    "dnssec.validation_cache_entries",
+    "ecs.egress.ipv4",
+    "ecs.egress.ipv6",
+    "ecs.mode",
+    "local.hosts.addresses",
+    "local.hosts.name",
+    "local.local_ttl",
+    "local.suffix_rules.group",
+    "local.suffix_rules.suffix",
+    "local.zones.authoritative",
+    "local.zones.name",
+    "local.zones.records.name",
+    "local.zones.records.rtype",
+    "local.zones.records.ttl",
+    "local.zones.records.value",
+    "logging.query_log",
+    "logging.query_log_sample",
+    "metrics.allow_non_loopback",
+    "network.confidence_decay_on_change",
+    "network.debounce",
+    "network.enabled",
+    "network.poll_interval",
+    "network.reference_v4",
+    "network.reference_v6",
+    "network.relearn_window",
+    "prefetch.enabled",
+    "prefetch.global_qps",
+    "prefetch.min_hits",
+    "prefetch.per_key_min_interval",
+    "prefetch.trigger_fraction",
+    "prefetch.warm_on_start",
+    "probe.allow_special_use_targets",
+    "probe.concurrency",
+    "probe.daily_bandwidth_budget_bytes",
+    "probe.enable_http3",
+    "probe.enabled",
+    "probe.extra_ports",
+    "probe.global_connections_per_second",
+    "probe.http_timeout",
+    "probe.max_candidates_per_rrset",
+    "probe.max_response_bytes",
+    "probe.per_domain_cooldown",
+    "probe.per_ip_cooldown",
+    "probe.per_prefix_cooldown",
+    "probe.profiles.allowed_status",
+    "probe.profiles.alpn",
+    "probe.profiles.body_sha256",
+    "probe.profiles.domains",
+    "probe.profiles.method",
+    "probe.profiles.name",
+    "probe.profiles.path",
+    "probe.profiles.required_header.name",
+    "probe.profiles.required_header.value",
+    "probe.profiles.required_issuer_cn",
+    "probe.profiles.spki_sha256",
+    "probe.tcp_timeout",
+    "probe.tls_timeout",
+    "ranking.consecutive_failure_base",
+    "ranking.enabled",
+    "ranking.evidence_half_life",
+    "ranking.exploration_rate",
+    "ranking.failure_penalty_ms",
+    "ranking.hysteresis",
+    "ranking.jitter_weight",
+    "ranking.min_successes_to_lead",
+    "ranking.neutral_cost_ms",
+    "ranking.sample_max_age",
+    "ranking.stale_sample_penalty_ms",
+    "ranking.tail_weight",
+    "ranking.uncertainty_penalty_ms",
+    "serve_stale.client_timeout",
+    "serve_stale.include_ede",
+    "serve_stale.retry_interval",
+    "server.allow_from",
+    "server.any_policy",
+    "server.deny_from",
+    "server.foreground_budget",
+    "server.rate_limit.client_table_size",
+    "server.rate_limit.enabled",
+    "server.rate_limit.global_burst",
+    "server.rate_limit.global_qps",
+    "server.rate_limit.per_client_burst",
+    "server.rate_limit.per_client_qps",
+    "server.special_use",
+    "server.tcp.advertise_edns_keepalive",
+    "server.tcp.idle_timeout",
+    "server.tcp.max_connection_lifetime",
+    "server.tcp.max_connections",
+    "server.tcp.max_connections_per_client",
+    "server.tcp.max_message_bytes",
+    "server.tcp.max_pipelined_queries",
+    "server.udp.max_payload",
+    "server.udp.non_edns_max_payload",
+    "storage.flush_interval",
+    "storage.max_candidate_rows",
+    "storage.max_hot_rows",
+    "storage.max_quality_rows",
+    "storage.row_max_age",
+    "ttl.cap_cloudflare_augment",
+    "ttl.cap_cloudflare_preserve",
+    "ttl.cap_default",
+    "ttl.cap_network_change",
+    "ttl.cap_optimized_multi",
+    "ttl.cap_serve_stale",
+    "ttl.network_change_window",
+    "upstream.default_group",
+    "upstream.groups.name",
+    "upstream.groups.scheduler.circuit_failure_threshold",
+    "upstream.groups.scheduler.circuit_half_open_successes",
+    "upstream.groups.scheduler.circuit_open_duration",
+    "upstream.groups.scheduler.emergency_fanout",
+    "upstream.groups.scheduler.emergency_fanout_max",
+    "upstream.groups.scheduler.explore_rate",
+    "upstream.groups.scheduler.hedge_enabled",
+    "upstream.groups.scheduler.hedge_max_delay",
+    "upstream.groups.scheduler.hedge_max_fraction",
+    "upstream.groups.scheduler.hedge_min_delay",
+    "upstream.groups.scheduler.hedge_percentile",
+    "upstream.groups.scheduler.query_timeout",
+    "upstream.groups.servers.addresses",
+    "upstream.groups.servers.bind_addr",
+    "upstream.groups.servers.ecs.ipv4",
+    "upstream.groups.servers.ecs.ipv6",
+    "upstream.groups.servers.enable_cookies",
+    "upstream.groups.servers.enabled",
+    "upstream.groups.servers.name",
+    "upstream.groups.servers.path",
+    "upstream.groups.servers.port",
+    "upstream.groups.servers.server_name",
+    "upstream.groups.servers.transport",
+    "upstream.groups.servers.trust_ad",
+    "upstream.groups.servers.weight",
+    "upstream.tls.extra_ca_files",
+    "upstream.tls.quic_zero_rtt",
+    "upstream.tls.session_resumption",
+    "upstream.tls.use_system_roots",
+];
+
 /// Render a refusal message an operator can act on.
 pub fn describe(items: &[RestartRequired]) -> String {
     let mut text = String::from("reload refused: these fields require a restart:");
@@ -427,5 +625,144 @@ mod tests {
                 "changing {label} was not detected as restart-required"
             );
         }
+    }
+
+    /// Every leaf path named in the section reference of `docs/CONFIGURATION.md`.
+    ///
+    /// CI keeps the documented paths identical to the struct tree in
+    /// `src/config/mod.rs` (via `scripts/check-config-docs.py`), so the documented leaf
+    /// set is the complete set of configuration leaf paths. `Config::default()` cannot
+    /// serve as the complete source on its own: its serialized form omits `None` fields
+    /// and empty collections, so paths such as `probe.profiles.name` never appear in it.
+    fn documented_leaf_paths() -> std::collections::BTreeSet<String> {
+        let text = include_str!("../../docs/CONFIGURATION.md");
+        let start = text
+            .find("## Section reference")
+            .expect("section reference heading");
+        let end = text[start..]
+            .find("## Validation rules")
+            .map(|i| start + i)
+            .expect("validation rules heading");
+        let mut paths = std::collections::BTreeSet::new();
+        let mut section: Option<String> = None;
+        for line in text[start..end].lines() {
+            if let Some(rest) = line.strip_prefix("### `") {
+                // `[server.udp]` and `[[upstream.groups]]` both denote the dotted path.
+                let path = rest
+                    .trim_start_matches('[')
+                    .split(']')
+                    .next()
+                    .expect("heading path");
+                section = Some(path.to_string());
+                paths.insert(path.to_string());
+            } else if let Some(rest) = line.strip_prefix("| `") {
+                let key = rest.split('`').next().expect("row key");
+                let section = section.as_ref().expect("row before any section heading");
+                paths.insert(format!("{section}.{key}"));
+            }
+        }
+        // A leaf is a path no other path extends; everything else is a table.
+        paths
+            .iter()
+            .filter(|p| !paths.iter().any(|o| o.starts_with(&format!("{p}."))))
+            .cloned()
+            .collect()
+    }
+
+    /// Every leaf path in the serialized form of a configuration.
+    ///
+    /// Array elements share the array's dotted path (`upstream.groups.0.name` is
+    /// `upstream.groups.name`); empty arrays carry no key structure and emit nothing.
+    fn serialized_leaf_paths(
+        value: &toml::Value,
+        prefix: &str,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        match value {
+            toml::Value::Table(table) => {
+                for (key, child) in table {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    serialized_leaf_paths(child, &path, out);
+                }
+            }
+            toml::Value::Array(items) => {
+                for item in items {
+                    if matches!(item, toml::Value::Table(_) | toml::Value::Array(_)) {
+                        serialized_leaf_paths(item, prefix, out);
+                    } else {
+                        out.insert(prefix.to_string());
+                    }
+                }
+            }
+            _ => {
+                out.insert(prefix.to_string());
+            }
+        }
+    }
+
+    /// Every configuration leaf path is classified exactly once: either listed in
+    /// [`RELOADABLE`] or detected by [`restart_required`] (and so named by `catalog()`).
+    ///
+    /// Without this, a new field defaults to "reloadable" by omission — nobody decided,
+    /// and a wrong default here is a daemon that silently keeps its old behaviour.
+    #[test]
+    fn every_config_path_is_classified_exactly_once() {
+        use std::collections::BTreeSet;
+
+        // `catalog()` groups related fields as "a / b"; split the groups into paths.
+        let restart: BTreeSet<&str> = catalog()
+            .iter()
+            .flat_map(|entry| entry.field.split(" / "))
+            .collect();
+        let reloadable: BTreeSet<&str> = RELOADABLE.iter().copied().collect();
+
+        let both: Vec<_> = restart.intersection(&reloadable).copied().collect();
+        assert!(
+            both.is_empty(),
+            "classified as both reloadable and restart-required: {both:?}"
+        );
+
+        let classified: BTreeSet<&str> = restart.union(&reloadable).copied().collect();
+        let documented = documented_leaf_paths();
+
+        let unclassified: Vec<_> = documented
+            .iter()
+            .filter(|path| !classified.contains(path.as_str()))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "configuration paths with no reload classification; add each to RELOADABLE \
+             or to restart_required and MUTATIONS: {unclassified:?}"
+        );
+
+        let stale: Vec<_> = classified
+            .iter()
+            .filter(|path| !documented.contains(**path))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "classified paths that are not configuration fields (typo or stale entry): \
+             {stale:?}"
+        );
+
+        // Anchor the classification in the real parser as well as in the documentation:
+        // everything the serialized default configuration expresses must be classified.
+        let value =
+            toml::Value::try_from(Config::default()).expect("the default configuration serializes");
+        let mut serialized = BTreeSet::new();
+        serialized_leaf_paths(&value, "", &mut serialized);
+        let unclassified_serialized: Vec<_> = serialized
+            .iter()
+            .filter(|path| !classified.contains(path.as_str()))
+            .collect();
+        assert!(
+            unclassified_serialized.is_empty(),
+            "paths present in the serialized configuration but not classified: \
+             {unclassified_serialized:?}"
+        );
     }
 }

@@ -317,7 +317,7 @@ One named group of upstream servers. At least one group must exist and one must 
 | --- | --- | --- | --- |
 | `name` | string | `"default".to_string()` | Group name referenced by suffix rules and by `upstream.default_group`. |
 | `servers` | array of `[[upstream.groups.servers]]` | two public resolvers over DoT (see `[[upstream.groups]]` below) | Members of the group. |
-| `scheduler` | sub-table `[upstream.scheduler]` | see below | Scheduling policy for this group. |
+| `scheduler` | sub-table `[upstream.groups.scheduler]` | see below | Scheduling policy for this group. |
 
 ### `[[upstream.groups.servers]]`
 
@@ -336,9 +336,18 @@ One upstream server inside a group.
 | `enabled` | boolean | `true` | Disable without deleting. |
 | `enable_cookies` | boolean (optional) | unset | Send RFC 7873 DNS Cookies. `None` means "automatic": enabled for UDP and TCP, disabled for encrypted transports where they add nothing. Setting `true` explicitly on an encrypted transport is a configuration error. |
 | `trust_ad` | boolean | `false` | Trust this upstream's AD bit when local validation is disabled. Requires an authenticated transport. |
-| `ecs` | sub-table `[ecs.egress]` (optional) | unset | Per-server ECS override; `None` inherits the global policy. |
+| `ecs` | sub-table `[upstream.groups.servers.ecs]` (optional) | unset | Per-server ECS override; `None` inherits the global policy. |
 
-### `[upstream.scheduler]`
+### `[upstream.groups.servers.ecs]`
+
+A per-server ECS prefix override, with the same shape and rules as `[ecs.egress]`; it applies to this upstream server only.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ipv4` | IPv4 CIDR (optional) | — | IPv4 prefix advertised to this server. Must be a public prefix. |
+| `ipv6` | IPv6 CIDR (optional) | — | IPv6 prefix advertised to this server. Must be a public prefix. |
+
+### `[upstream.groups.scheduler]`
 
 Hedging, circuit breaking and failure-cache behaviour.
 
@@ -424,11 +433,20 @@ One probe profile.
 | `path` | string | `"/".to_string()` | Health-check path. |
 | `method` | string | `"HEAD".to_string()` | HTTP method; only `HEAD` and `GET` are permitted. |
 | `allowed_status` | list of integer | `vec![200, 204, 301, 302, 400, 403, 404, 405]` | Status codes considered a successful validation. |
-| `required_header` | sub-table `[[probe.profiles.required_headers]]` (optional) | unset | A response header that must be present, and optionally its exact value. |
+| `required_header` | sub-table `[probe.profiles.required_header]` (optional) | unset | A response header that must be present, and optionally its exact value. |
 | `body_sha256` | string (optional) | unset | Hex-encoded SHA-256 of the expected (small) response body. |
 | `spki_sha256` | list of string | `[]` (empty) | Permitted hex-encoded SHA-256 values of the server certificate SPKI. |
 | `required_issuer_cn` | string (optional) | unset | Required issuer common name substring. |
 | `alpn` | list of string | `vec!["h2".to_string(), "http/1.1".to_string()]` | ALPN protocols offered, in preference order. |
+
+### `[probe.profiles.required_header]`
+
+The response header a profile requires, set by `required_header` in `[[probe.profiles]]`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | — | Header name, compared case-insensitively. |
+| `value` | string (optional) | unset | Exact value the header must carry; unset means only presence is required. |
 
 ### `[network]`
 

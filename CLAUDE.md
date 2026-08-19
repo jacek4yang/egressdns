@@ -52,13 +52,17 @@ complete, and "leave it for later" is not one of them:
 
 1. **Implement it** — a production consumer outside `src/config/`, plus a regression test
    that demonstrates the observable behaviour changing.
-2. **Classify it restart-required** — add it to `restart_required` *and* to `MUTATIONS` in
-   the same file, so `catalog()` covers it and the documentation cannot drift.
+2. **Classify it** — every field is either restart-required (add it to
+   `restart_required` *and* to `MUTATIONS` in `src/config/reload.rs`, so `catalog()`
+   covers it and the documentation cannot drift) or reloadable (add its full dotted path
+   to `RELOADABLE` in the same file). `every_config_path_is_classified_exactly_once`
+   fails with the path named until you do one of the two.
 3. **Remove it.** A field that is parsed, validated and never read is worse than a missing
    feature: it tells an operator they have a control they do not have.
 
-`scripts/check-config-docs.py` fails CI when a field is undocumented or a documented key is
-not a real field. `egressdnsctl reload-contract` prints the classification.
+`scripts/check-config-docs.py` fails CI when a full configuration path (e.g.
+`probe.queue_size`, not bare `queue_size`) is undocumented or a documented path is not a
+real field. `egressdnsctl reload-contract` prints the classification.
 
 ## Invariants that must not be broken
 
