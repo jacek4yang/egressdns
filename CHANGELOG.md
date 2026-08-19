@@ -121,7 +121,16 @@ upstream is involved, no scenario regressing.
   `ad` set on signed names, fails closed on a bogus one, TCP answers, NXDOMAIN matches
   upstream, two reloads under continuous traffic with zero failed queries,
   `systemd-analyze security` 1.7 OK.
-* Soak: 15 minutes, 32.4 million queries, 100% success, RSS flat, no fd or thread growth.
+* Soak: 90 minutes, **177,250,187 queries**, 32,824 qps, success 1.000, zero errors and zero
+  timeouts. RSS rose from 12 MB to a 103.0 MB plateau as the cache filled and then declined
+  to 97.2 MB; threads stayed at 6 throughout; file descriptors ended at the 11 they started
+  with. p50 1.63 ms, p99 9.84 ms, p99.9 25.95 ms.
+
+  One query in the run recorded 49.7 s. That is client-side queueing in the closed-loop
+  generator rather than daemon latency: `server.foreground_budget` is 2.5 s, so the daemon
+  cannot hold a query for 49.7 s — it would have returned SERVFAIL at the deadline, and
+  every one of the 177 million responses was NOERROR. It is recorded here rather than
+  omitted, but it is not a resolver measurement.
 
 ### Known limitations
 

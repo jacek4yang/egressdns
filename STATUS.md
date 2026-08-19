@@ -30,7 +30,7 @@ entire test suite accepted.
 | Answers agree with Unbound | **Measured** — `scripts/differential-test.py`, both forwarding to the same upstream, Unbound 1.22.0 with DNSSEC validation: **15 cases agree, 0 differ** |
 | The installer canary rejects a broken resolver | **Tested** — `tests/installer.rs`, five cases, running `canary()` extracted from the shipped `install.sh` |
 | `dig` exits 0 on REFUSED, so the old canary passed a dead resolver | **Measured** — verified against a daemon whose ACL excluded loopback |
-| Sustained soak | **Measured** — 15 minutes, 32.4M queries, 36,048 qps, 100% success, RSS flat at 102.2 MB, 14 fds, 6 threads |
+| Sustained soak | **Measured** — 90 minutes, **177,250,187 queries**, 32,824 qps, success 1.000, 0 errors, 0 timeouts. RSS rose from 12 MB to a 103.0 MB plateau as the cache filled, then *declined* to 97.2 MB; threads flat at 6; file descriptors returned to their starting 11. p50 1.63 ms, p99 9.84 ms, p99.9 25.95 ms. |
 | CI green on the branch | **Measured** — run 32308436155, all seven jobs including the aarch64 cross build |
 | The aarch64 binary actually runs | **Measured** — the published aarch64 artifact under qemu-user: config validates, A queries answer, the `ad` flag is set on a signed name, TCP answers, NXDOMAIN is correct. Emulated, not native hardware. |
 | Release artifacts are reproducible from the workflow | **Measured** — v2.0.0-rc2 archives for x86_64 and aarch64 built by CI, `sha256sum -c SHA256SUMS` verifies |
