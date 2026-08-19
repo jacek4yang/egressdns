@@ -18,30 +18,36 @@ use serde_json::Value;
     about = "Control and inspect a running EgressDNS daemon"
 )]
 struct Cli {
+    // These four are global so they may be given before or after the subcommand:
+    // `egressdnsctl doctor --config FILE` is the documented spelling, and making the
+    // operator remember which side of the verb a flag lives on is a papercut.
     /// Administration socket path.
     #[arg(
         short,
         long,
+        global = true,
         env = "EGRESSDNS_ADMIN_SOCKET",
         default_value = "/run/egressdns/admin.sock"
     )]
     socket: PathBuf,
 
-    /// Configuration file, used by `check-config` when the daemon is not running.
+    /// Configuration file, used by `doctor` and by `check-config` when the daemon is not
+    /// running.
     #[arg(
         short,
         long,
+        global = true,
         env = "EGRESSDNS_CONFIG",
         default_value = "/etc/egressdns/config.toml"
     )]
     config: PathBuf,
 
     /// Emit raw JSON instead of a human-readable summary.
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 
     /// Request timeout in seconds.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, global = true, default_value_t = 10)]
     timeout: u64,
 
     #[command(subcommand)]
@@ -55,6 +61,11 @@ enum Command {
     Status,
     /// Validate the configuration file.
     CheckConfig,
+    /// Diagnose whether this configuration would actually work on this host.
+    ///
+    /// Answered locally, without the daemon, so it can be run before a cutover. Exits
+    /// non-zero when a check finds something that would stop the resolver serving.
+    Doctor,
     /// Reload the configuration atomically.
     Reload,
     /// List every setting that cannot be changed by reload, and why.
@@ -150,6 +161,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // `doctor` is always answered locally. Its whole purpose is to run before the daemon
+    // exists, against a configuration that has not been activated yet.
+    if matches!(cli.command, Command::Doctor) {
+        return Ok(run_doctor(&cli));
+    }
+
     if matches!(cli.command, Command::CheckConfig) && !cli.socket.exists() {
         return match egressdns::config::Config::load(&cli.config) {
             Ok(_) => {
@@ -188,10 +205,65 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     })
 }
 
+/// Diagnose the configuration against this host and render the report.
+///
+/// A configuration that does not even parse is itself the diagnosis, so it is reported as
+/// a single failing check rather than as a CLI error: `doctor` should always produce a
+/// report, and `--json` consumers should always get one document.
+fn run_doctor(cli: &Cli) -> ExitCode {
+    let report = match egressdns::config::Config::load(&cli.config) {
+        Ok(config) => egressdns::doctor::run(&config, &cli.config),
+        Err(e) => egressdns::doctor::Report {
+            checks: vec![egressdns::doctor::Check {
+                id: "config.valid",
+                title: "Configuration parses and validates",
+                status: egressdns::doctor::Status::Fail,
+                detail: e.to_string(),
+                remedy: Some(String::from(
+                    "fix the configuration; no other check can be trusted until it parses",
+                )),
+            }],
+        },
+    };
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+        );
+        return ExitCode::from(report.exit_code());
+    }
+
+    println!(
+        "EgressDNS deployment diagnosis for {}\n",
+        cli.config.display()
+    );
+    for check in &report.checks {
+        println!("[{:<14}] {}", check.status.label(), check.title);
+        println!("                 {}", check.detail);
+        if let Some(remedy) = &check.remedy {
+            println!("                 -> {remedy}");
+        }
+    }
+    let tally = report.tally();
+    let summary: Vec<String> = tally.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    println!("\n{}", summary.join(", "));
+    if report.has_failure() {
+        println!("\nAt least one check would stop the resolver from serving.");
+    } else if report.has_warning() {
+        println!("\nNo blocking problem found; review the warnings before cutover.");
+    } else {
+        println!("\nNo problem found.");
+    }
+    ExitCode::from(report.exit_code())
+}
+
 fn encode(command: &Command) -> (String, Vec<String>) {
     match command {
         Command::Status => ("status".into(), vec![]),
         Command::CheckConfig => ("check-config".into(), vec![]),
+        // Answered locally before this point is reached; never sent to the daemon.
+        Command::Doctor => ("doctor".into(), vec![]),
         // Answered locally before this point is reached; never sent to the daemon.
         Command::ReloadContract => ("reload-contract".into(), vec![]),
         Command::Reload => ("reload".into(), vec![]),

@@ -48,7 +48,7 @@ ipnet = { version = "2", features = ["serde"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 moka = { version = "0.12", features = ["sync"] }
-nix = { version = "0.31", default-features = false, features = ["net"] }
+nix = { version = "0.31", default-features = false, features = ["net", "user"] }
 parking_lot = "0.12"
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"] }
 rand = "0.10"
