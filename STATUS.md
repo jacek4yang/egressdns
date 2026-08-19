@@ -1,6 +1,36 @@
 # Status
 
-**Version**: 1.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>, branch `main`, tag `v1.0.0`
+**Version**: 2.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>, branch `feat/v2-autonomous-adaptive-resolver`
+
+## 2.0.0 summary
+
+Seven defects fixed, two features added. Three of the defects were found by running the
+software rather than by reading it: two by installing it on a real host and watching it
+report perfect health while answering nothing, one by the load harness after a change the
+entire test suite accepted.
+
+| Claim | Evidence |
+| --- | --- |
+| A `version = 2` file of two keys starts and answers | **Tested** — `tests/config_v2.rs::a_minimal_v2_configuration_starts_and_answers` |
+| One `https://` entry yields H3 and H2 candidates | **Tested** — `tests/config_v2.rs::one_https_upstream_becomes_both_http_versions` |
+| `proxies` is refused, never silently ignored | **Tested** — `tests/config_v2.rs::declaring_a_proxy_is_refused_rather_than_ignored` |
+| `doctor` detects port conflicts, forwarding loops and ACL gaps | **Tested** — 20 tests in `src/doctor/` |
+| `doctor` runs correctly on a real host | **Measured** — run under `sudo` against the live deployment; found and then confirmed the fix for two of its own misdiagnoses |
+| `ProcSubset=pid` broke all resolution | **Measured** — reproduced under `systemd-run`; see `docs/incidents/2026-08-deployment-failure.md` |
+| A blind address-family detector still resolves | **Tested** — `tests/deployment.rs::a_failed_address_family_detection_still_resolves` |
+| The packaged unit does not hide `/proc/net` | **Tested** — `tests/deployment.rs::the_systemd_unit_does_not_hide_proc_net_from_the_detector` |
+| A proven route outranks untried routes | **Tested** — `src/upstream/scheduler.rs::a_proven_route_outranks_routes_that_have_never_been_tried`, fails before the fix |
+| The ranking fix changes real behaviour | **Measured** — same host, same ten real names, back to back: 0/30 answered before, 9/30 after |
+| No untried ranked route is skipped by fallback | **Tested** — three tests in `tests/scheduler_contract.rs` |
+| One absolute deadline covers the truncation retry | **Tested** — `tests/scheduler_contract.rs::truncation_retry_cannot_exceed_the_foreground_deadline`, measured 4.005s against a 2.5s budget before the fix |
+| Cancelled exchanges keep their slot, bounded | **Measured** — unbounded retention took truncation from 15,285 qps at 100% to 1,187 at 0%; capped at 100ms it is 16,336 qps at 100% |
+| Reload publishes one coherent policy generation | **Structural** — the request path reads config-derived policy from the `Config` the `ArcSwap` publishes; plus **Tested** by `effective_mode_ignores_an_override_stronger_than_the_live_configuration` |
+| Real DNSSEC validation works end to end | **Measured** — `dig +dnssec @127.0.0.1 cloudflare.com A` returns NOERROR with the `ad` flag set, against real upstreams on port 53 |
+| systemd lifecycle is clean | **Measured** — two `reload`s under continuous traffic with zero failed queries; `stop`/`start` cycle clean; `systemd-analyze security` **1.7 OK** |
+| Proxy egress | **Not implemented.** Declaring one is a hard error. |
+| DDR, SVCB/HTTPS discovery, RESINFO, ECH, ODoH, MASQUE | **Not implemented.** |
+
+Original 1.0.0 status follows.
 
 This document exists to be checked, not believed. Every claim below either names the
 command that produced it or says plainly that it was not exercised here.
@@ -44,7 +74,7 @@ rustc 1.95.0. Details in `docs/BENCHMARKS.md`.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Tests | `cargo nextest run --workspace --all-features` | **421 passed, 0 failed** |
+| Tests | `cargo test --workspace --all-features` | **482 passed, 0 failed** (2.0.0) |
 | Lint | `cargo clippy --all-targets --all-features -- -D warnings` | Clean |
 | Format | `cargo fmt --all -- --check` | Clean |
 | Release build | `cargo build --release --locked` | Succeeds |

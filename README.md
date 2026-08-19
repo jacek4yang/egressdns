@@ -12,6 +12,45 @@ dataset refresh, or a prediction.
 If every adaptive subsystem fails, what is left is a correct caching forwarder. That is the
 design contract, and it is tested.
 
+## The whole configuration
+
+```toml
+version = 2
+upstreams = [
+    "1.1.1.1",
+    "2606:4700:4700::1111",
+    "https://cloudflare-dns.com/dns-query",
+    "tls://dns.quad9.net",
+]
+```
+
+That is a complete, working file. Listeners default to loopback, so a minimal
+configuration cannot accidentally become an open resolver.
+
+You describe *where to ask*. The daemon decides *how*: UDP or TCP, HTTP/2 or HTTP/3, IPv4
+or IPv6, which endpoint to prefer, when to hedge, when to break a circuit and when to try
+a recovered path again — all from what it measures on your actual network, not from
+constants you had to guess in advance. A single `https://` entry becomes both an HTTP/3 and
+an HTTP/2 route candidate for one logical resolver, and the scheduler picks between them
+and falls back on its own evidence.
+
+Before cutting over, ask what would break:
+
+```sh
+egressdnsctl doctor --config /etc/egressdns/config.toml
+```
+
+It checks listener ownership (naming the PID that holds the port), forwarding loops, ACL
+coverage, `/etc/resolv.conf` management, service-account permissions, privileged-port
+capability, address-family egress, and whether your upstreams are actually reachable from
+this host — the check that distinguishes "the resolver is broken" from "this network
+filters port 853", which otherwise look identical. Every result is `PASS`, `WARNING`,
+`FAIL`, `NOT_APPLICABLE` or `NOT_TESTED`; a `FAIL` exits non-zero. A check that could not
+look says so rather than reporting success.
+
+Every low-level setting is still available for the cases that need it — see
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md) — but you should not need any of them.
+
 ```
                     ┌──────────────────────────────────────────┐
    LAN clients ───► │ ingress (UDP/TCP 53, v4+v6)              │

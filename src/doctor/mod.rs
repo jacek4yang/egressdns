@@ -516,8 +516,10 @@ fn check_acl(config: &Config) -> Check {
         );
     }
 
-    let loopback_v4: IpAddr = "127.0.0.1".parse().expect("literal");
-    let loopback_v6: IpAddr = "::1".parse().expect("literal");
+    // Constants rather than parsed literals: nothing on a production path should be able
+    // to panic, however obviously well-formed the input looks.
+    let loopback_v4 = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let loopback_v6 = IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
     let covers_loopback = allow.iter().any(|n| n.contains(&loopback_v4))
         || allow.iter().any(|n| n.contains(&loopback_v6));
 

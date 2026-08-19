@@ -4,6 +4,98 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — intent-oriented configuration and deployment correctness, 2026-08-19
+
+The theme is that the resolver should decide, and that its own signals should be worth
+believing. Two of the defects below were found by installing this build on a real host and
+watching it report perfect health while answering nothing; a third was found by the load
+harness after a change that every test in the suite accepted.
+
+### Added
+
+* **`version = 2` intent-oriented configuration.** A working file is now two keys:
+
+  ```toml
+  version = 2
+  upstreams = ["1.1.1.1", "https://cloudflare-dns.com/dns-query", "tls://dns.quad9.net"]
+  ```
+
+  Entries may be bare addresses, provider aliases, or `https://`, `tls://`, `quic://`,
+  `udp://` and `tcp://` URIs. One `https://` entry becomes both an HTTP/3 and an HTTP/2
+  route candidate for one logical resolver, because which is better on a given network is
+  a measurement rather than a configuration choice. Named endpoints take bootstrap
+  addresses from a small provider registry; the TLS identity is always the configured
+  name, so a stale bootstrap address fails closed. `http://` and encrypted transports
+  pointed at literal addresses are refused. The advanced `[[upstream.groups]]` form is
+  unchanged and still available.
+* **`egressdnsctl doctor`.** Pre-cutover deployment diagnosis, answered locally without
+  the daemon: listener ownership with the owning PID resolved from `/proc`, forwarding
+  loops (own listener, known local stub, local address on port 53), ACL coverage and
+  open-resolver exposure, `/etc/resolv.conf` classification, state and trust-anchor
+  permissions, privileged-port capability, address-family egress, upstream reachability,
+  and systemd unit state. `PASS` / `WARNING` / `FAIL` / `NOT_APPLICABLE` / `NOT_TESTED`,
+  with `--json` and a non-zero exit on failure.
+* `egressdns_upstream_family_fallback_total` and `egressdns_upstream_last_resort_total`
+  siblings for the two availability fallbacks in ranking.
+
+### Fixed
+
+* **The daemon reported ready and answered nothing.** `ProcSubset=pid` in the packaged
+  systemd unit hides `/proc/net/route`, so the address-family detector found no default
+  route, published both families as `Unusable`, and the scheduler was left with no route
+  to rank — SERVFAIL on every query, with the installer canary passing because it ran
+  before the detector's first tick. See
+  [docs/incidents/2026-08-deployment-failure.md](docs/incidents/2026-08-deployment-failure.md).
+* **A detection failure could black-hole all traffic.** Family usability is derived from
+  the host routing table, so it fails when the *observation* fails. `rank` now treats "no
+  family reads as usable" the way it already treats "every circuit is open" and offers
+  every route rather than none.
+* **The route ranker penalised routes it had measured.** An unmeasured route scored ~365;
+  a route measured working at a realistic 250 ms round trip scored ~551, and lower wins.
+  Measuring a route therefore demoted it below every untried one, and the scheduler cycled
+  through its whole route list forever preferring whatever it knew least about. Invisible
+  on loopback, where both the test suite and the load harness run. Unmeasured routes are
+  now priced at the median of the measured ones. Measured on a real host: 0/30 real names
+  answered before, 9/30 after, with 34 upstream exchanges against 8.
+* **Untried routes were skipped by the emergency fallback.** Positional accounting assumed
+  the top two ranked routes had been started, but the hedge only starts when hedging is
+  enabled, the budget allows it and the delay fits — so with any of those false the second
+  route was recorded as tried without being contacted, and fallback began at rank three.
+  Replaced with an explicit attempted set.
+* **Nested operations each received a fresh copy of the foreground budget.** The truncation
+  retry handed both stream candidates the full remaining budget, measured at 4.005 s
+  against a 2.5 s promise; permit acquisition and the send that followed had the same
+  problem. Everything now derives from one absolute deadline.
+* **A sent exchange released its accounting slot on cancellation**, so the ceiling bounded
+  waiters rather than exchanges. A guard now holds the slot past cancellation, bounded by
+  a 100 ms grace — the first implementation held it for the whole remaining timeout and
+  took the truncation scenario from 15,285 qps at 100% success to 1,187 at 0%.
+* **Runtime policy was published in two steps.** A reload swapped `RuntimeState` and then
+  separately updated the probe, prefetch and Cloudflare toggles, so a query could observe
+  new configuration with old policy. The request path now reads config-derived policy from
+  the `Config` the swap publishes.
+* **`doctor`'s own first implementation misdiagnosed this host** in two ways, both now
+  covered by tests: an unprivileged bind of port 53 fails with `EACCES` rather than
+  `EADDRINUSE` and was reported as a port conflict that did not exist, and an IPv4
+  wildcard socket was matched as the owner of an IPv6 address, turning one healthy
+  listener into four phantom conflicts.
+
+### Performance
+
+Load harness, same host, this branch against the previous release, run back to back:
+cache-hit 38,504 vs 38,358 qps (p99 2.73 vs 2.76 ms), mixed 37,449 vs 37,400, miss-heavy
+17,886 vs 16,932 (p99 9.28 vs 10.89 ms), servfail 16,078 vs 14,843, truncation 16,336 vs
+14,948 (p99 10.04 vs 11.29 ms). Parity on the cache-served paths, 5–9% better where the
+upstream is involved, no scenario regressing.
+
+### Known limitations
+
+* `proxies` is parsed and **refused**: proxy egress is not implemented. Declaring one is an
+  error rather than a silently ignored key.
+* Named endpoints outside the provider registry must use the advanced form with explicit
+  `addresses`; there is no runtime bootstrap resolver.
+* No DDR, SVCB/HTTPS resolver discovery, RESINFO, ECH, ODoH or MASQUE.
+
 ## [Unreleased] — production-hardening pass, 2026-08-19
 
 A semantic audit of the 1.0.0 source. The theme is that configuration, documentation and
