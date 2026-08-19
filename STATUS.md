@@ -1,31 +1,31 @@
 # Status
 
-**Version**: 1.0.0 · **Date**: 2026-08-19 · **Git history**: newly initialised, 9 commits, no tags
+**Version**: 1.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>, branch `main`, tag `v1.0.0`
 
 This document exists to be checked, not believed. Every claim below either names the
 command that produced it or says plainly that it was not exercised here.
 
-## Read this first: what "verified" means in this document
+## Read this first: provenance and what "verified" means
 
-The source was delivered as an archive with **no `.git` directory**. The repository in this
-tree was initialised from that archive during the hardening pass. It has 9 commits and
-no tags, and it is not a continuation of any earlier history:
+The source arrived as an archive with **no `.git` directory**. The Git history in this
+repository was initialised from that archive, so it is short and honest rather than long
+and reconstructed:
 
 ```
-c3a8b19  Stop shipping a manifest that can never verify
-80cae1e  Bar fallible-panic constructs from production paths, and check it in CI
-04a563b  Re-run every benchmark and load scenario on the hardened tree
-c70f468  Add docs/RELEASING.md and make every repository placeholder explicit
-fe7c435  Rewrite the documentation to match what the code actually does
-f106379  Retry a truncated UDP answer over TCP without a second server entry
-162f8d1  Add a realistic load harness and remove unpinnable CI actions
-27d911c  Make the control plane follow reloads, and every ceiling real
-750c050  import: EgressDNS v1.0.0 source archive (sha256 312f184a...)
+d10740c  fix: make install.sh --local-build work under sudo and in a test prefix
+d1a4916  test: prove a DNSSEC mode reload fails closed on the data plane
+2e63f54  test: make the config audit full-path aware and force classification
+9966f74  fix: eliminate dead config and unify the probe concurrency ceiling
+ad2b67d  docs: hard-code the real GitHub repository in install and release metadata
+0404d55  docs: record cloudflare restart-required fields and per-exchange ceiling
+2563236  fix: bound physical upstream exchanges, not resolutions
+564fcc6  fix: make cloudflare enabled/mode reload-consistent in foreground state
+ff2410e  import: EgressDNS v1.0.0 source archive (hardening baseline)
 ```
 
-No prior commit SHA, tag, CI run or release is referenced anywhere in this document,
-because none was available to inspect. `v1.0.0` is the version in `Cargo.toml`; no tag has
-been created and nothing has been published.
+The archive itself was the product of an earlier hardening pass whose findings are
+recorded in `CHANGELOG.md`; that pass's commit history was not recoverable and is not
+reconstructed here.
 
 Claims in this document fall into five categories, and each row below is marked:
 
@@ -37,122 +37,107 @@ Claims in this document fall into five categories, and each row below is marked:
 | **Static** | The artefact was inspected but not executed here, because this environment cannot execute it. |
 | **Unverified** | Not checked here at all. Stated so you do not assume otherwise. |
 
+Environment: Intel Core i3-8100 (4 cores), 15 GiB RAM, Debian 13, kernel 6.12,
+rustc 1.95.0. Details in `docs/BENCHMARKS.md`.
+
 ## Build and test summary — Measured
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Tests | `cargo test --workspace --all-features` | **408 passed, 0 failed** |
-| Lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Clean |
+| Tests | `cargo nextest run --workspace --all-features` | **421 passed, 0 failed** |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | Clean |
 | Format | `cargo fmt --all -- --check` | Clean |
 | Release build | `cargo build --release --locked` | Succeeds |
-| Shipped configs | `egressdnsd --config config/*.toml --check-config` | All three valid |
-| Docs | `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings` | Clean |
+| Shipped configs | `egressdnsd --config config/*.toml --check-config` (release binary) | All three valid |
+| Docs | `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings` | Clean |
 | Advisories | `cargo audit` | 0 vulnerabilities across 334 dependencies |
 | Licences and bans | `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` |
-| Shell lint | `shellcheck --shell=bash` on every script | Clean **at every severity**, not just warning and above |
-| Python lint | `python3 -m ruff check scripts/` | Clean |
-| Config docs sync | `./scripts/check-config-docs.py` | 229 fields, all documented, none stale |
+| Python lint | `ruff check scripts/` | Clean |
+| Config docs sync | `./scripts/check-config-docs.py` | **224 fields across 39 tables**, all documented, none stale — now full-path aware |
+| Reload classification | `cargo test --all-features config::reload` | Every one of the 224 leaf paths is classified exactly once: reloadable or restart-required |
 | Production paths | `./scripts/check-production-paths.py` | No `unwrap`/`expect`/`todo!`/`unimplemented!`/`unsafe` outside test modules |
-| Source archive | `./scripts/verify-source-archive.sh … --full` | Extracts to a clean directory, builds `--release --locked`, runs all 408 tests, verifies `MANIFEST.sha256`, checks every shipped config, and confirms no secrets, no absolute local paths and no forbidden reference. **All checks pass.** |
 | Action pinning | `./scripts/pin-github-actions.sh --check` | Every `uses:` is a commit SHA |
-| Workflow YAML | `python3 -c 'yaml.safe_load(...)'` | Both files parse |
+| Workflow YAML | parsed with a real YAML parser (see below) | Both workflows parse |
 | Shell syntax | `bash -n install.sh upgrade.sh uninstall.sh scripts/*.sh` | Clean |
+| Installer smoke | `sudo EGRESSDNS_TEST_ROOT=<prefix> ./install.sh --local-build`, run twice | Installs binaries, unit and config; validates config; second run is an idempotent in-place upgrade |
 
 `#![forbid(unsafe_code)]` is declared in `src/lib.rs`, so `unsafe` cannot compile at all;
 `check-production-paths.py` catches it anyway in case a `#[allow]` is ever added.
 
-Test breakdown: 327 unit tests in the library, 20 resolution, 10 transport, 8 scheduling,
-14 Cloudflare security, 13 property (256 generated cases each), **7 hot-reload**,
-**7 resource-bound**, 2 harness smoke.
+**ShellCheck is not installed in this environment and could not be run here.** `bash -n`
+passes on every script, and CI runs ShellCheck directly (`--severity=warning`); the
+workflows are SHA-pinned and were not modified in this pass. **PyYAML is not installed and
+PyPI is unreachable from this environment**, so the workflow YAML check used the YAML
+parser bundled with Prettier instead of `yaml.safe_load`; both files parse. The same
+restriction is why the installer smoke used `--local-build` (no release download) — see
+the un-exercised table below.
 
-The reload and bounds suites are new in this pass and are the two that would have caught
-the P0 and P1 findings.
-
-## The P0 and P1 findings
+## The P0 and P1 findings — this pass
 
 | Finding | Severity | Disposition | Evidence |
 | --- | --- | --- | --- |
-| Hot reload did not reload runtime behaviour | P0 | **Fixed by design change.** Every supervised task now takes a `tasks::Ctx` (a `Weak<App>`) and re-reads config, state and resolver each iteration. No task holds configuration. | Tested — `tests/reload.rs::a_reload_moves_foreground_queries_to_the_new_upstream`, `::background_tasks_observe_the_reloaded_configuration`, `::disabling_probing_by_reload_stops_probe_work` |
-| No rigorous reload contract | P0 | **Fixed.** `src/config/reload.rs` classifies every field; a restart-required change is refused by name and nothing is applied. `catalog()` is derived from the same check, so documentation cannot drift. | Tested — `::a_restart_required_change_is_refused_and_leaves_the_process_untouched`, `src/config/reload.rs::tests::the_catalog_covers_every_mutation_exactly_once` |
-| `dnssec.max_concurrent_validations` semantically dead | P1 | **Implemented** as a semaphore acquired in `Resolver::fetch`; shedding is SERVFAIL plus `dnssec_shed_total`. Classified restart-required. | Tested — `tests/bounds.rs::dnssec_validation_concurrency_is_bounded` |
-| `dnssec.trust_anchor_file` decorative | P1 | **Implemented and fails closed.** Anchors are loaded at `Resolver::new`; a missing, unreadable or empty file refuses startup *and* reload rather than falling back to the built-in anchors. | Structural — `src/dns/resolver.rs::Resolver::new` returns `Result`; every caller propagates |
-| `resources.max_inflight_upstream` did not bound anything | P1 | **Implemented** in `Scheduler::resolve`, the single function every upstream query passes through — foreground, stale refresh, prefetch and DNSSEC auxiliary lookups alike. | Tested — `tests/bounds.rs::max_inflight_upstream_actually_bounds_upstream_work`, `::shedding_at_the_upstream_ceiling_is_visible` |
-| ProbeEngine created unbounded waiting tasks | P1 | **Fixed.** The worker permit is acquired *before* the job leaves the channel, so a queued job is not a live task. | Tested — `tests/bounds.rs::probe_workers_are_bounded_before_a_job_is_dequeued` (2,000 jobs offered; task growth under 200) |
+| Foreground answers used the **startup** Cloudflare config after a reload | P0 | **Fixed.** `CloudflareState.enabled`/`mode` are now atomics updated by `reconfigure()` during `App::reload`; admin mode overrides are reconciled against the new configured mode. `cloudflare.candidate_pool_max` and `cloudflare.sampling.{seed,buckets_per_prefix,exploit_fraction}` are classified restart-required instead of silently ignored. | Tested — `tests/reload.rs::reloading_the_cloudflare_mode_reaches_the_foreground_state`, `::toggling_cloudflare_enabled_by_reload_reaches_the_foreground_state`, `::cloudflare_structural_changes_are_refused_as_restart_required` |
+| `resources.max_inflight_upstream` bounded **resolutions**, not exchanges — hedging and emergency fan-out multiplied the real ceiling up to 3× | P0 | **Fixed.** The shared permit is acquired per physical exchange inside `Scheduler::attempt`, after the hedge delay, around `route.send`. Primaries and truncation retries queue within budget; hedges and fan-out shed immediately at the ceiling. Shed attempts record no health evidence, so saturation cannot flap circuit breakers. | Tested — `tests/bounds.rs::hedging_cannot_multiply_the_upstream_ceiling`, `::emergency_fanout_cannot_multiply_the_upstream_ceiling`, `::truncation_retry_does_not_deadlock_at_a_ceiling_of_one` |
+| Config audit collapsed fields to leaf names (`queue_size` × 3, `enabled` × 14, …) | P1 | **Fixed.** `scripts/check-config-docs.py` is full-path aware on both sides; `src/config/reload.rs` now has an explicit `RELOADABLE` list and `every_config_path_is_classified_exactly_once` fails the build when a new field is added without classification. | Measured — the rewrite caught three real doc gaps (a nonexistent `[upstream.scheduler]` section, undocumented `probe.profiles.required_header`, undocumented per-server ECS overrides), all fixed |
+| `prefetch.queue_size` parsed, validated, documented, never read | P1 | **Removed** (config, validation, docs, examples). The prefetcher bounds work with its QPS semaphore; there is no queue to size. | Structural — no reference remains |
+| `probe.profiles[].port` parsed, validated, never read | P1 | **Removed.** The engine probes the job's port. | Structural — no reference remains |
+| `probe.{tcp,tls,http}_concurrency` collapsed to `min()` — two knobs always inert | P1 | **Replaced** by one truthful `probe.concurrency` (default 8 = the old effective ceiling; range preserves every previously reachable value). Old keys fail loudly at parse (`deny_unknown_fields`). | Tested — `tests/bounds.rs::probe_workers_are_bounded_before_a_job_is_dequeued` uses the new knob |
+| `cache.negative_max_ttl` captured at startup, misclassified reloadable | P1 | **Fixed** — read from the live configuration where the negative TTL is computed. | Tested — `tests/reload.rs::negative_max_ttl_follows_a_reload` |
 
-## Defects found beyond the brief
-
-Each of these was found by the new load harness or by the semantic audit, and none of them
-would have moved a Criterion number.
+## Defects found beyond the brief — this pass
 
 | Defect | How it was found | Fix |
 | --- | --- | --- |
-| A UDP-only upstream group turned **every answer over 512 bytes into SERVFAIL** | Load harness, `truncation` scenario: 9.1% SERVFAIL against an upstream doing nothing worse than truncating | RFC 1035 §4.2.1 / RFC 7766 §5 companion TCP route per UDP server, excluded from ordinary ranking. Truncation scenario is now **100% success** |
-| Hyper's connection-driver task was aborted before the response body was read, and leaked on every error path | Code audit of `src/probe/fetch.rs` | RAII `DriverGuard` held until the body completes; overall fetch deadline added |
-| `cloudflare.augment.min_samples` parsed and never read | Semantic config audit | Implemented: an unmeasured address may be *reordered* on neutral evidence but never *added* to an answer on it |
-| `cloudflare.static_candidates` validated and never consumed | Semantic config audit | Implemented with `CandidateOrigin::Config`, re-checked against the official prefix snapshot every round |
-| `logging.query_log` / `query_log_sample` parsed, validated, never consulted | Semantic config audit | Implemented as sampled structured query logging, deterministic in the message ID |
-| `Storage::flush` blocked a runtime worker with `thread::sleep` | Code audit | Made async |
-| Shutdown slept 500 ms and exited without joining the control plane | Code audit | `App::shutdown_and_join` cancels, waits, and reports how many tasks had to be aborted |
-| Blocking filesystem I/O on runtime workers (secret reading, prefix cache) | Code audit | Moved to `spawn_blocking`; the prefix cache is now written atomically |
-| `ludeeus/action-shellcheck@master` executed whatever its maintainer last pushed | Supply-chain audit | Removed; ShellCheck is invoked directly |
+| `cache.failure_max_ttl` silently clipped after a reload that raised it | Semantic audit of cache construction | The failures cache's retention bound is now the validation ceiling (`FAILURE_MAX_TTL_CEILING`), which covers every legal value; per-entry TTLs were already live |
+| `resources.systemd_watchdog` claimed reloadable but read once at startup | Classification audit | Restart-required; a reload changing it is refused by name |
+| `ResolveError::Overloaded` reported "permits free" while carrying the configured ceiling; the DNSSEC shed site passed `available_permits()` | Review of the limiter change | Both sites report the configured ceiling |
+| `sudo ./install.sh --local-build` failed: sudo drops the user's rustup cargo from PATH | Executing the documented install path | `build_locally` falls back to the invoking user's `~/.cargo/bin` and builds as that user, so `target/` is not left root-owned |
+| The systemd unit directory was assumed to exist | Installer smoke under `EGRESSDNS_TEST_ROOT` | Created before the unit is installed |
 
-### Configuration fields removed
-
-Removed rather than kept for compatibility, because a field that is parsed and never read
-tells an operator they have a control they do not have:
-
-`cache.max_entries`, `cache.variant_max_entries` (replaced by `variant_max_memory_bytes`),
-`upstream.tls.tls_client_cert_file`, `upstream.tls.tls_client_key_file`,
-`upstream.groups[].scheduler.max_attempts_per_route`, `.variant_sample_qps`,
-`ecs.strip_inbound`, `ecs.ab_test_fraction`, `probe.throughput_concurrency`,
-`probe.follow_redirects`, `metrics.unix_socket`, `cloudflare.sampling.ipv4_enabled` and
-`.ipv6_enabled` (replaced by a single `enabled`, because IPv6 sampling could never be
-defensible and a flag that must always be false is not a setting).
-
-`upstream.groups[].scheduler.max_attempts_per_route` deserves its own note: it was
-validated to be 1–3 in the name of RFC 9520 §3.2, but the scheduler makes at most one
-attempt per route per resolution regardless of its value. The compliance claim was true;
-the mechanism named in the documentation was not the one providing it.
+The earlier pass's findings (reload redesign, UDP truncation/TCP companion, probe worker
+bounds, DNSSEC ceilings, and the rest) are recorded in `CHANGELOG.md`; their regression
+tests all still run and pass.
 
 ## Load-test results — Measured
 
 Full method, environment and caveats in `docs/BENCHMARKS.md`. Reproduce with
-`./scripts/load-test.sh`. Raw JSON in `target/loadtest/`.
+`./scripts/load-test.sh`. Raw JSON in `target/loadtest/` (not committed).
 
-The two accounting rules that make these numbers meaningful:
-
-* **A reply is not a success.** `useful` counts NOERROR *with an answer record*. In the
-  `servfail` scenario `qps` and `useful_qps` differ by 16%; reading only the former would
-  report a failing upstream as throughput.
-* **The generator is closed-loop and shares two vCPUs with the daemon.** In every scenario
-  below, `qps` is within 0.5% of the recorded `harness_ceiling_qps`: the harness saturated
-  first, so these are **floors on the daemon's capacity, not measurements of it**.
+15 s per scenario (120 s for `sustained`), 8 clients × 8 in flight, against
+`scripts/mock_upstream.py` on loopback:
 
 | Scenario | qps | useful qps | success | p50 | p99.9 | RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `cache-hit` | 30,031 | 30,031 | 100% | 0.49 ms | 21.8 ms | 14 MB |
-| `mixed` | 35,058 | 35,058 | 100% | 0.71 ms | 22.6 ms | 24 MB |
-| `miss-heavy` | 7,208 | 7,208 | 100% | 5.05 ms | 33.1 ms | 225 MB |
-| `elevated-rtt` (40±15 ms) | 1,886 | 1,886 | 100% | 38.0 ms | 75.9 ms | 119 MB |
-| `packet-loss` (2%) | 7,231 | 7,231 | 100% | 2.93 ms | 351 ms | 225 MB |
-| `timeouts` (10%) | 2,059 | 2,057 | 99.9% | 0.63 ms | 671 ms | 124 MB |
-| `servfail` (20%) | 7,004 | 6,154 | 87.9% | 9.22 ms | 34.2 ms | 214 MB |
-| `truncation` (15%) | 6,323 | 6,323 | 100% | 12.1 ms | 33.8 ms | 215 MB |
-| `ipv6-mixed` | 34,417 | 34,417 | 100% | 0.75 ms | 27.0 ms | 33 MB |
-| `dnssec-closed` | 24,285 | **0** | **0%** | 0.61 ms | 64.7 ms | 20 MB |
-| `sustained` (7 min) | 22,278 | 22,278 | 100% | 1.89 ms | 38.1 ms | 96 MB |
+| `cache-hit` | 38,319 | 38,319 | 100% | 1.63 ms | 5.60 ms | 14 MB |
+| `mixed` | 37,347 | 37,347 | 100% | 1.66 ms | 6.51 ms | 24 MB |
+| `miss-heavy` | 18,409 | 18,409 | 100% | 5.57 ms | 13.2 ms | 207 MB |
+| `elevated-rtt` (40±15 ms) | 1,680 | 1,680 | 100% | 39.5 ms | 55.5 ms | 62 MB |
+| `packet-loss` (2%) | 9,852 | 9,852 | 100% | 0.48 ms | 356 ms | 166 MB |
+| `timeouts` (10%) | 1,824 | 1,822 | 99.9% | 0.28 ms | 2,000 ms | 65 MB |
+| `servfail` (20%) | 16,222 | 13,854 | 85.4% | 5.76 ms | 15.6 ms | 188 MB |
+| `truncation` (15%) | 15,969 | 15,969 | 100% | 6.12 ms | 16.0 ms | 196 MB |
+| `ipv6-mixed` | 36,798 | 36,798 | 100% | 1.66 ms | 6.96 ms | 34 MB |
+| `dnssec-closed` | 32,605 | **0** | **0%** | 1.77 ms | 22.5 ms | 21 MB |
+| `sustained` (2 min) | 37,018 | 37,018 | 100% | 1.64 ms | 11.5 ms | 97 MB |
 
-17.4 million queries across the suite. File descriptors peaked at 75, threads at 4, in
-every scenario.
+7.6 million queries across the suite. File descriptors peaked at 78, threads at 6, in
+every scenario. In every scenario `qps` is within 2% of the recorded
+`harness_ceiling_qps` — the generator saturated first, so these are **floors on the
+daemon's capacity, not measurements of it**.
 
 `dnssec-closed` returning **0% useful is the correct result and the point of the
 scenario**: validation against an upstream that supplies no chain of trust must fail
-closed. 1,093,126 queries, 1,093,126 SERVFAILs. A single NOERROR there would be a serious
+closed. 489,183 queries, 489,183 SERVFAILs. A single NOERROR there would be a serious
 security defect.
 
-**No leak.** A separate 8-minute soak — 9,256,227 queries at 19,283 qps — shows RSS
-climbing from 11.5 MB to 96.1 MB as the cache fills and then **completely flat for the
-final five minutes** (`rss_mb_growth_last_third = 0.0 MB`), with threads flat at 4.
+**No leak.** The `sustained` run — 4,442,251 queries at 37,018 qps — shows RSS climbing
+from 12.1 MB to 97.4 MB as the cache fills and then **completely flat for the final ninety
+seconds** (`rss_mb_growth_last_third = 0.0 MB`), threads flat at 6.
+
+The per-exchange upstream limiter introduced this pass was exercised by every scenario
+above — hedging (loss/timeout scenarios), emergency fan-out (`servfail`), and truncation
+retries all pass through it. No contention or deadlock was observed; the bounds tests
+(`tests/bounds.rs`) prove the ceiling itself.
 
 ## Un-exercised in this environment
 
@@ -160,14 +145,15 @@ These are environment limits, not implementation gaps.
 
 | Item | Why not here | How to exercise it |
 | --- | --- | --- |
-| Binding UDP/TCP **port 53** specifically | No `CAP_NET_BIND_SERVICE`, no init system. The listener code is port-independent and is exercised on ephemeral ports throughout. | `sudo setcap 'cap_net_bind_service=+ep' ./target/release/egressdnsd` |
+| ShellCheck | Not installed; no package network access. `bash -n` passes; CI runs ShellCheck directly. | Push and watch the `shell` CI job |
+| The GitHub Actions workflows | The repository was created in this pass; the workflows had not run at the time of writing. Both parse; every action is SHA-pinned. | Watch the Actions tab on the pushed commits and the `v1.0.0` tag |
+| The download path of `install.sh` | Release assets are produced by the tag-triggered release workflow; at the time of writing they did not exist to download. The rest of the installer (build, install, validate, idempotent upgrade) was executed via `--local-build`. | After the `v1.0.0` release is published: `curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh \| sudo bash` |
+| Binding UDP/TCP **port 53** specifically | No init system here; the listener code is port-independent and is exercised on ephemeral ports throughout. | `sudo setcap 'cap_net_bind_service=+ep' /usr/local/bin/egressdnsd` |
 | systemd unit activation and sandbox verification | No systemd here. | `sudo systemctl start egressdns && systemd-analyze security egressdns` |
-| The GitHub Actions workflows | Creating or pushing to a remote repository was not authorised, and none exists. Both files parse and every action is SHA-pinned. | Push to a repository and watch the Actions run. |
-| `install.sh` against a real release | Requires published release assets. | `sudo ./install.sh --local-build` exercises everything except download and checksum fetch. |
-| aarch64 runtime behaviour | x86_64 host. CI cross-*builds* aarch64; it does not run it. | Run the suite on aarch64, or under `qemu-user`. |
-| Real-world Cloudflare probing | Outbound probing to arbitrary hosts is not appropriate from a build container and the results would not represent a real egress. | `egressdnsctl cloudflare scan-now` on a deployed node. |
-| Multi-hour soak and chaos runs | Time-bounded environment, 2 vCPU. The longest run here is recorded in `docs/BENCHMARKS.md`. | `./scripts/load-test.sh --sustained 86400`, `./scripts/chaos-test.sh` |
-| Two-node DNS-A/DNS-B deployment | Single container. | `docs/OPERATIONS.md` §7 |
+| aarch64 runtime behaviour | x86_64 host. CI cross-*builds* aarch64; it does not run it. | Run the suite on aarch64, or under `qemu-user` |
+| Real-world Cloudflare probing | Outbound probing to arbitrary hosts is not appropriate from a build machine and the results would not represent a real egress. | `egressdnsctl cloudflare scan-now` on a deployed node |
+| Multi-hour soak and chaos runs | Time-bounded environment. The longest run here is recorded in `docs/BENCHMARKS.md`. | `./scripts/load-test.sh --sustained 86400`, `./scripts/chaos-test.sh` |
+| Two-node DNS-A/DNS-B deployment | Single machine. | `docs/OPERATIONS.md` §7 |
 
 ## Known limitations
 
@@ -177,8 +163,8 @@ These are environment limits, not implementation gaps.
 3. **Linux-specific network detection.** `/proc/net/route` parsing is Linux-only.
 4. **`.test` is deliberately not blocked** by the special-use registry, for the reason
    recorded in `src/dns/specialuse.rs`.
-5. **Verified-augment fires rarely by design.** Seven conditions must now hold
-   simultaneously — `min_samples` added one. `docs/adr/0010`.
+5. **Verified-augment fires rarely by design.** Seven conditions must hold simultaneously —
+   `min_samples` added one. `docs/adr/0010`.
 6. **Learned state is per-node.** Two nodes must not share a SQLite file. Documented rather
    than enforced, because enforcement would need locking that could block.
 7. **Persisted statistics can be dropped under write pressure.** By design. `docs/adr/0008`.
@@ -186,3 +172,8 @@ These are environment limits, not implementation gaps.
    drive it from a separate machine.
 9. **`--inflight` is bounded by the 16-bit DNS transaction ID space** per client thread.
    The default of 8 is far below that; a pathological value is not defended against.
+10. **A cancelled hedge can leave one zombie upstream exchange.** When a hedge loses the
+    race its permit is released immediately, but the datagram already sent is still
+    processed by the upstream. The observed in-flight count at the upstream can therefore
+    exceed the configured ceiling by at most one momentarily; the permit ceiling itself is
+    strict. This is inherent to cancelling UDP — the wire cannot be unsent.

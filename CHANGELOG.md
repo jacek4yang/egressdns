@@ -26,8 +26,22 @@ documentation.
   whose *configured* transport was a stream — so a group with one `transport = "udp"`
   server had nothing to retry over. Every UDP server now gets a companion TCP route to the
   same address and port (RFC 1035 §4.2.1, RFC 7766 §5), excluded from ordinary ranking.
-* **`resources.max_inflight_upstream` bounded nothing.** Now a semaphore acquired in
-  `Scheduler::resolve`, the single function every upstream query passes through.
+* **`resources.max_inflight_upstream` bounded resolutions, not exchanges.** The semaphore
+  was acquired once per `Scheduler::resolve`, but one resolution can run a primary, a hedge
+  and emergency fan-out attempts concurrently — the real ceiling was the configured value
+  times three. The shared permit is now acquired per physical exchange inside
+  `Scheduler::attempt`: primaries and truncation retries queue within the remaining budget,
+  hedges and fan-out shed immediately at the ceiling, and a shed attempt records no health
+  evidence, so saturation cannot flap a circuit breaker. `tests/bounds.rs` proves the
+  ceiling under active hedging and fan-out.
+* **The foreground answer path kept the startup Cloudflare configuration after a reload.**
+  Background tasks re-read the live configuration, but `CloudflareState` — retained across
+  reloads — had captured `cloudflare.enabled` and `cloudflare.mode` at construction, so
+  reloads moved the background work while answers kept the old behaviour. Both are now
+  atomics updated by `CloudflareState::reconfigure` during `App::reload`, with any admin
+  mode override reconciled against the new configured mode. `cloudflare.candidate_pool_max`
+  and `cloudflare.sampling.{seed,buckets_per_prefix,exploit_fraction}`, which rebuild would
+  discard state for, are classified restart-required instead of being silently ignored.
 * **`dnssec.max_concurrent_validations` bounded nothing.** Now a semaphore acquired in
   `Resolver::fetch`; shedding is SERVFAIL plus `dnssec_shed_total`.
 * **`dnssec.trust_anchor_file` was decorative.** Anchors are now loaded at resolver
@@ -70,14 +84,24 @@ documentation.
   applied. `catalog()` is derived from the same check that runs, so documentation cannot
   drift from behaviour.
 * `egressdnsctl reload-contract` prints the classification without contacting the daemon.
-* `tests/reload.rs` — seven behavioural reload tests, asserting on which upstream
-  answered and whether work stopped, never on the contents of the in-memory config.
-* `tests/bounds.rs` — seven resource-ceiling tests that demonstrate limits binding.
+* `tests/reload.rs` — behavioural reload tests, asserting on which upstream answered and
+  whether work stopped, never on the contents of the in-memory config. Now includes
+  Cloudflare mode/enabled reloads reaching the foreground, restart-required rejection of
+  structural Cloudflare changes, and `cache.negative_max_ttl` following a reload.
+* `tests/bounds.rs` — resource-ceiling tests that demonstrate limits binding, including
+  hedging and emergency fan-out unable to multiply the upstream exchange ceiling, and the
+  truncation retry completing at a ceiling of one.
 * `scripts/mock_upstream.py`, `scripts/loadtest.py`, `scripts/load-test.sh` — an eleven
   scenario load suite with measured percentiles to p99.9, full rcode accounting, and
   RSS/fd/thread/CPU sampling from `/proc`.
 * `scripts/check-config-docs.py` and `scripts/pin-github-actions.sh --check`, both wired
-  into CI.
+  into CI. The config audit is full-path aware: `prefetch.queue_size` and
+  `storage.queue_size` no longer mask each other, and a doc row under the wrong section
+  fails the check.
+* Every configuration leaf path is classified exactly once — reloadable or
+  restart-required — in `src/config/reload.rs`, and the test
+  `every_config_path_is_classified_exactly_once` fails the build when a new field is added
+  without a classification.
 * `cloudflare.augment.min_samples`, `cloudflare.static_candidates`, `logging.query_log`
   and `logging.query_log_sample` now do what they say.
 * `prefetch.warm_on_start`, `serve_stale.retry_interval` and `datasets.reload_interval`

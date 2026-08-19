@@ -14,7 +14,7 @@ scheduler and every other query competing for the same cores. Nothing in this do
 makes that leap.
 
 Everything below was produced on the machine described, by the commands shown, from the
-tree at commit `c70f468`. Nothing is estimated, extrapolated, or carried over from another
+tree tagged `v1.0.0`. Nothing is estimated, extrapolated, or carried over from another
 machine or another version. The unedited Criterion output is in
 [`benchmarks/raw-2026-08-19.txt`](benchmarks/raw-2026-08-19.txt); the only edit is
 substituting the build directory with `<source-tree>` so no absolute local path is
@@ -25,21 +25,22 @@ because it is a property of the machine that produced it.
 
 | | |
 | --- | --- |
-| CPU | Intel Xeon @ 2.80 GHz, **2 vCPU**, 1 thread per core |
-| Memory | 7.8 GiB |
-| Kernel | Linux 6.18.5 x86_64 |
-| Distribution | Ubuntu 24.04.4 LTS, glibc 2.39 |
+| CPU | Intel Core i3-8100 @ 3.60 GHz, **4 cores**, 1 thread per core |
+| Memory | 15 GiB |
+| Kernel | Linux 6.12.100 x86_64 |
+| Distribution | Debian 13 (trixie), glibc 2.41 |
 | Rust | rustc 1.95.0 (59807616e 2026-04-14) |
 | Profile | `[profile.release]` — `lto = "thin"`, `codegen-units = 1`, `panic = "unwind"`, `strip = "debuginfo"` |
 | Criterion | 0.8, default sampling (50 samples per benchmark) |
 | Date | 2026-08-19 |
 
-This is a shared two-core virtual machine. Three consequences, stated rather than hidden:
+This is a small desktop-class machine, and the load generator runs on it too. Three
+consequences, stated rather than hidden:
 
 1. **Outliers are frequent.** On dedicated hardware the outlier rate is normally low single
    digits.
 2. **Anything that would benefit from parallelism is understated.**
-3. **The load generator competes with the daemon for the same two cores.** See the
+3. **The load generator competes with the daemon for the same cores.** See the
    saturation note below — it is the single most important caveat in this document.
 
 ---
@@ -49,7 +50,7 @@ This is a shared two-core virtual machine. Three consequences, stated rather tha
 These are the numbers that describe behaviour. Reproduce with:
 
 ```sh
-./scripts/load-test.sh --duration 45 --sustained 480 --clients 8 --inflight 8
+./scripts/load-test.sh --duration 15 --sustained 120 --clients 8 --inflight 8
 ```
 
 The harness starts `scripts/mock_upstream.py` (a scriptable DNS upstream with delay,
@@ -60,11 +61,11 @@ and drives it with `scripts/loadtest.py`.
 
 **A reply is not a success.** Counting any DNS response as a completed query lets a
 failing upstream be reported as throughput. In the `servfail` scenario the two numbers
-differ by 16%:
+differ by 15%:
 
 ```
-qps=5665.5   useful=4754.4   success=0.839
-rcodes={'noerror': 118909, 'servfail': 22786}
+qps=16221.5   useful=13853.6   success=0.854
+rcodes={'noerror': 207858, 'servfail': 35527}
 ```
 
 `useful qps` counts NOERROR responses **that contain an answer record** — the thing a
@@ -74,44 +75,47 @@ between "answered" and "answered usefully" is never invisible.
 **The generator saturated before the daemon did.** The generator is closed-loop: each
 client keeps `--inflight` queries outstanding, so throughput is bounded by
 `clients × inflight ÷ latency` by construction. Every run records `harness_ceiling_qps`,
-and in **every scenario below `qps` is within 0.5% of it**. That means these figures are
-**floors on the daemon's capacity, not measurements of it** — the Python generator and the
-daemon are sharing two cores, and the daemon used 36–73% of one of them. On real hardware,
-drive the load from a separate machine.
+and in **every scenario below `qps` is within 2% of it** (within 0.4% in all but the two
+loss scenarios, where retries stretch the observed latency the ceiling is derived from).
+That means these figures are **floors on the daemon's capacity, not measurements of it** —
+the Python generator and the daemon are sharing the machine, and the daemon used 20–123%
+of one core. On real hardware, drive the load from a separate machine.
 
 ## Results
 
-45 s per scenario (480 s for `sustained`), 8 clients × 8 in flight.
+15 s per scenario (120 s for `sustained`), 8 clients × 8 in flight.
 
 | Scenario | qps | useful qps | success | p50 | p99 | p99.9 | RSS | CPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `cache-hit` | 30,031 | 30,031 | 100% | 0.49 ms | 13.9 ms | 21.8 ms | 14 MB | 57% |
-| `mixed` | 35,058 | 35,058 | 100% | 0.71 ms | 14.4 ms | 22.6 ms | 24 MB | 69% |
-| `miss-heavy` | 7,208 | 7,208 | 100% | 5.05 ms | 28.8 ms | 33.1 ms | 225 MB | 71% |
-| `elevated-rtt` | 1,886 | 1,886 | 100% | 38.0 ms | 56.8 ms | 75.9 ms | 119 MB | 36% |
-| `packet-loss` | 7,231 | 7,231 | 100% | 2.93 ms | 37.1 ms | 351 ms | 225 MB | 69% |
-| `timeouts` | 2,059 | 2,057 | 99.9% | 0.63 ms | 337 ms | 671 ms | 124 MB | 42% |
-| `servfail` | 7,004 | 6,154 | 87.9% | 9.22 ms | 26.0 ms | 34.2 ms | 214 MB | 70% |
-| `truncation` | 6,323 | 6,323 | 100% | 12.1 ms | 27.8 ms | 33.8 ms | 215 MB | 70% |
-| `ipv6-mixed` | 34,417 | 34,417 | 100% | 0.75 ms | 14.6 ms | 27.0 ms | 33 MB | 71% |
-| `dnssec-closed` | 24,285 | **0** | **0%** | 0.61 ms | 28.0 ms | 64.7 ms | 20 MB | 71% |
-| `sustained` (7 min) | 22,278 | 22,278 | 100% | 1.89 ms | 20.9 ms | 38.1 ms | 96 MB | 73% |
+| `cache-hit` | 38,319 | 38,319 | 100% | 1.63 ms | 2.87 ms | 5.60 ms | 14 MB | 73% |
+| `mixed` | 37,347 | 37,347 | 100% | 1.66 ms | 3.79 ms | 6.51 ms | 24 MB | 76% |
+| `miss-heavy` | 18,409 | 18,409 | 100% | 5.57 ms | 8.63 ms | 13.2 ms | 207 MB | 123% |
+| `elevated-rtt` | 1,680 | 1,680 | 100% | 39.5 ms | 55.1 ms | 55.5 ms | 62 MB | 20% |
+| `packet-loss` | 9,852 | 9,852 | 100% | 0.48 ms | 334 ms | 356 ms | 166 MB | 84% |
+| `timeouts` | 1,824 | 1,822 | 99.9% | 0.28 ms | 335 ms | 2,000 ms | 65 MB | 21% |
+| `servfail` | 16,222 | 13,854 | 85.4% | 5.76 ms | 8.94 ms | 15.6 ms | 188 MB | 120% |
+| `truncation` | 15,969 | 15,969 | 100% | 6.12 ms | 9.42 ms | 16.0 ms | 196 MB | 120% |
+| `ipv6-mixed` | 36,798 | 36,798 | 100% | 1.66 ms | 5.82 ms | 6.96 ms | 34 MB | 81% |
+| `dnssec-closed` | 32,605 | **0** | **0%** | 1.77 ms | 18.4 ms | 22.5 ms | 21 MB | 86% |
+| `sustained` (2 min) | 37,018 | 37,018 | 100% | 1.64 ms | 7.50 ms | 11.5 ms | 97 MB | 84% |
 
-File descriptors peaked at 75 and threads at 4 in every scenario. Total queries completed
-across the suite: **17.4 million**.
+File descriptors peaked at 78 and threads at 6 in every scenario. Total queries completed
+across the suite: **7.6 million**.
 
 ### What each impaired scenario demonstrates
 
 **`packet-loss` (2% of upstream queries never answered) — 100% success.** Two upstream
-queries in a hundred vanishing is completely invisible to clients. The cost shows up in
-the tail: p99.9 of 351 ms against a p50 of 2.9 ms is the retry.
+queries in a hundred vanishing is essentially invisible to clients: one SERVFAIL out of
+147,880 queries. The cost shows up in the tail: p99.9 of 356 ms against a p50 of 0.48 ms
+is the retry.
 
-**`timeouts` (10% loss) — 99.9% success.** 84 SERVFAILs out of 92,787. Retries absorb a
-one-in-ten loss rate almost entirely, at the price of a 671 ms p99.9.
+**`timeouts` (10% loss) — 99.9% success.** 30 SERVFAILs out of 27,436. Retries absorb a
+one-in-ten loss rate almost entirely, at the price of a p99.9 at the two-second query
+deadline.
 
-**`servfail` (20% of upstream answers are SERVFAIL) — 87.9% success.** This is a
+**`servfail` (20% of upstream answers are SERVFAIL) — 85.4% success.** This is a
 regression test as much as a measurement. An upstream failing 20% of queries sets a natural
-ceiling near 80%; 87.9% means retries recovered some of them. The failure this guards
+ceiling near 80%; 85.4% means retries recovered some of them. The failure this guards
 against is the opposite: a result *far below* 80% would mean the circuit breaker had opened
 every route in the group and was refusing to send anything, turning a partially working
 upstream into a total outage. When no route is usable, all routes are now offered anyway,
@@ -119,45 +123,41 @@ worst-scored last — availability outranks the breaker's own policy. Watch
 `upstream_last_resort_total` to see it happen.
 
 **`truncation` (15% of UDP answers set TC) — 100% success.** This scenario found a defect
-during the hardening pass. Run against the unfixed tree it reported 90.9% success with
-26,738 SERVFAILs, because the stream retry only considered routes whose *configured*
-transport was a stream — and the harness upstream, like many real ones, is declared
-`transport = "udp"`. Every UDP server now gets a companion TCP route (RFC 1035 §4.2.1,
-RFC 7766 §5). Zero SERVFAILs across 284,588 queries.
+during the hardening pass. Run against the unfixed tree it reported 90.9% success, because
+the stream retry only considered routes whose *configured* transport was a stream — and
+the harness upstream, like many real ones, is declared `transport = "udp"`. Every UDP
+server now gets a companion TCP route (RFC 1035 §4.2.1, RFC 7766 §5). Zero SERVFAILs
+across 239,582 queries.
 
 **`dnssec-closed` — 0% useful, and that is the correct result.** Validation is enabled
 against an upstream that supplies no chain of trust, so every answer is unvalidatable.
-DNSSEC must fail closed: 1,093,126 queries, 1,093,126 SERVFAILs, no exceptions. **A single
-NOERROR in this scenario would be a serious security defect.** The 24,285 qps figure is the
+DNSSEC must fail closed: 489,183 queries, 489,183 SERVFAILs, no exceptions. **A single
+NOERROR in this scenario would be a serious security defect.** The 32,605 qps figure is the
 cost of the fail-closed path — failing is not slower than succeeding here, which matters,
 because a slow failure path is a denial-of-service amplifier.
 
 ## Memory: no leak, and a usable sizing rule
 
-An 8-minute soak — **9,256,227 queries at 19,283 qps** — sampling RSS once per second:
+The 2-minute `sustained` scenario — **4,442,251 queries at 37,018 qps** — sampling RSS
+once per second:
 
 ```
-11.5 → 65.9 → 85.9 → 88.4 → 93.3 → 94.8 → 95.5 → 95.8 → 95.8 → 95.8 → …
-                                                        ↑ flat from here to the end
+12.1 → 64.7 → 84.2 → 87.7 → 88.8 → 89.4 → 89.6 → … → 97.4 → 97.4 → 97.4 → …
+                                            ↑ flat for the final ninety seconds
 ```
 
-`rss_mb_growth_last_third = 0.0 MB`. Threads flat at 4. RSS climbs while the cache fills,
-then is **completely flat for the final five minutes across roughly six million queries**.
-A cache filling to its budget plateaus; a leak does not. `scripts/loadtest.py` reports
-`rss_mb_series` and `rss_mb_growth_last_third` on every run so this is checkable rather
-than asserted.
+`rss_mb_growth_last_third = 0.0 MB`. Threads flat at 6. RSS climbs while the cache fills,
+then is **completely flat for the last three quarters of the run**. A cache filling to its
+budget plateaus; a leak does not. `scripts/loadtest.py` reports `rss_mb_series` and
+`rss_mb_growth_last_third` on every run so this is checkable rather than asserted.
 
-Across scenarios with different working sets and cache budgets, steady-state resident
-memory fits:
-
-```
-RSS ≈ 15 MB + 1.6 × cache.max_memory_bytes
-```
-
-The 1.6 factor covers per-entry keys and metadata, the negative and variant caches, and
-allocator fragmentation. The 15 MB floor is the runtime, connection pools and the metric
-registry. **Plan capacity from this relationship, not from the budget alone**: a 1 GiB
-cache budget is a ~1.7 GB process.
+In `miss-heavy`, the daemon peaked at **207 MB resident against a 256 MiB cache budget**
+with a 200,000-name working set. The working set does not fill the budget in this run, so
+the conservative planning rule stands: budget the process at roughly
+`15 MB + 1.6 × cache.max_memory_bytes` — the 1.6 factor covers per-entry keys and
+metadata, the negative and variant caches, and allocator fragmentation. **Plan capacity
+from the budget, not from the observed RSS of a partial fill**: a 1 GiB cache budget is a
+~1.7 GB process.
 
 ## What the load tests are not
 
