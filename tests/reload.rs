@@ -100,7 +100,12 @@ async fn negative_max_ttl_follows_a_reload() {
     // Every name is NXDOMAIN with a one-hour negative TTL, so the configured cap decides.
     handler.set_default(Behaviour::NxDomain { minimum: 3_600 });
     let base = common::udp_upstream_fragment(addr);
-    let loose = format!("{base}\n[cache]\nnegative_max_ttl = 120\n");
+    // Both caps sit below the provisional ceiling that v3 applies to a negative no second
+    // authority could corroborate — with one mock upstream, every negative here is
+    // single-source. Keeping both values under that ceiling is what makes the *configured*
+    // cap the binding constraint, which is the thing this test is about: that a reloaded
+    // value reaches the place the negative TTL is computed.
+    let loose = format!("{base}\n[cache]\nnegative_max_ttl = 4\n");
     let daemon = Daemon::start(&loose).await;
 
     // The authority SOA carries the negative TTL the client was handed.
@@ -116,12 +121,12 @@ async fn negative_max_ttl_follows_a_reload() {
         .query_udp(&common::query("before.test.", RecordType::A, false))
         .await;
     let before_ttl = negative_ttl(&before);
-    assert!(
-        (46..=120).contains(&before_ttl),
+    assert_eq!(
+        before_ttl, 4,
         "the startup cap must bound the negative TTL, got {before_ttl}"
     );
 
-    let tight = format!("{base}\n[cache]\nnegative_max_ttl = 45\n");
+    let tight = format!("{base}\n[cache]\nnegative_max_ttl = 2\n");
     daemon
         .reload_with(&tight)
         .expect("cache.negative_max_ttl is reloadable");
@@ -131,8 +136,8 @@ async fn negative_max_ttl_follows_a_reload() {
         .query_udp(&common::query("after.test.", RecordType::A, false))
         .await;
     let after_ttl = negative_ttl(&after);
-    assert!(
-        (1..=45).contains(&after_ttl),
+    assert_eq!(
+        after_ttl, 2,
         "the reloaded cap must govern new negative entries, got {after_ttl}"
     );
 }

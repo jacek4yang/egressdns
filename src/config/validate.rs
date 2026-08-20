@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::error::ConfigError;
 use crate::util::ipclass;
 
-use super::{AnyPolicy, CloudflareMode, Config, DnssecMode, EcsMode, ProbeProfile, TransportKind};
+use super::{AnyPolicy, CloudflareMode, Config, EcsMode, ProbeProfile, TransportKind};
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> ConfigError {
     ConfigError::invalid(path, message)
@@ -571,7 +571,7 @@ fn validate_dnssec(cfg: &Config) -> Result<(), ConfigError> {
             "must be greater than zero",
         ));
     }
-    if d.trust_upstream_ad && matches!(d.mode, DnssecMode::Validate) {
+    if d.trust_upstream_ad && d.mode.validates() {
         return Err(err(
             "dnssec.trust_upstream_ad",
             "cannot trust an upstream AD bit while performing local validation; choose one",

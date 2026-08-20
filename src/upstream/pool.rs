@@ -43,6 +43,15 @@ pub struct RouteKey {
     /// server are different paths with different failure modes, and each must carry its
     /// own health. They are *not* different authorities: see [`RouteKey::authority`].
     pub path: Arc<str>,
+    /// What this resolver is to us: an independent authority, or the local forwarder.
+    ///
+    /// Kept beside [`RouteKey::authority`] rather than folded into it because the two
+    /// answer different questions. The authority says *who* answered; the role says
+    /// whether their agreement is worth anything. A home gateway forwards to somebody
+    /// else, so agreeing with it proves only that it and we asked the same upstream —
+    /// which is why it can be the fastest source on the network and still not be a second
+    /// opinion.
+    pub role: crate::config::auto::ResolverRole,
     /// Which resolver is actually answering.
     ///
     /// Cloudflare over DoH/3, Cloudflare over DoH/2, Cloudflare over IPv6 and Cloudflare
@@ -308,6 +317,7 @@ impl UpstreamRegistry {
                             transport: server.transport,
                             addr: *addr,
                             path: Arc::from(path.id().as_str()),
+                            role: server.role,
                             authority: Arc::from(authority_of(server, *addr).as_str()),
                         };
                         let cookie = CookieState::new(&key);
@@ -350,6 +360,7 @@ impl UpstreamRegistry {
                                     transport: TransportKind::Tcp,
                                     addr: *addr,
                                     path: Arc::from(cpath.id().as_str()),
+                                    role: server.role,
                                     authority: Arc::from(authority_of(server, *addr).as_str()),
                                 };
                                 let cookie = CookieState::new(&key);

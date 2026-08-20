@@ -479,6 +479,47 @@ impl DnsCache {
             .invalidate_entries_if(move |k, _| k.name == t3);
     }
 
+    /// Replace the DNSSEC state of a cached entry, in place.
+    ///
+    /// The evidence plane's write path. A foreground answer is cached the moment it is
+    /// served, before anything is known about its signatures; when validation finishes it
+    /// says so here, and the *next* client to ask gets an answer that carries what was
+    /// learned — AD when Secure, nothing extra when merely insecure.
+    ///
+    /// Only ever strengthens or annotates. An entry that has already been replaced by a
+    /// newer one is left alone, because a verdict about the answer we validated says
+    /// nothing about the answer that replaced it.
+    pub fn promote(&self, key: &CacheKey, fingerprint: u64, status: DnssecStatus) -> bool {
+        let Some(existing) = self.answers.get(key) else {
+            return false;
+        };
+        if existing.fingerprint != fingerprint {
+            return false;
+        }
+        if existing.dnssec == status {
+            return false;
+        }
+        let mut updated = (*existing).clone();
+        updated.dnssec = status;
+        self.answers.insert(key.clone(), Arc::new(updated));
+        true
+    }
+
+    /// Remove one cached answer, if it is still the one described by `fingerprint`.
+    ///
+    /// Used when validation proves a served variant Bogus. Fingerprinted so that a late
+    /// verdict cannot delete an answer it never examined.
+    pub fn evict_variant(&self, key: &CacheKey, fingerprint: u64) -> bool {
+        let Some(existing) = self.answers.get(key) else {
+            return false;
+        };
+        if existing.fingerprint != fingerprint {
+            return false;
+        }
+        self.answers.invalidate(key);
+        true
+    }
+
     /// Invalidate every entry at or beneath `suffix`.
     pub fn flush_suffix(&self, suffix: &str) {
         let target = normalize_name(suffix);

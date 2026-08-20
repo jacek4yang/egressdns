@@ -19,6 +19,27 @@ pub enum FlightError {
     LeaderGone,
     /// The leader published a failure.
     Failed(Arc<str>),
+    /// The leader published a failure that must not be cached.
+    ///
+    /// A resolution that failed because we ran out of time to *check* an answer is not
+    /// evidence that the name is broken, and remembering it as one turns a slow moment
+    /// into minutes of denial for a name that resolves perfectly well.
+    Transient(Arc<str>),
+}
+
+impl FlightError {
+    /// Whether the caller may remember this failure.
+    pub fn is_cacheable(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// The reason, for reporting.
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::LeaderGone => "the leading query was cancelled",
+            Self::Failed(d) | Self::Transient(d) => d,
+        }
+    }
 }
 
 type Shared<V> = Result<V, FlightError>;
@@ -139,6 +160,16 @@ where
     /// Publish a failure to every waiter.
     pub fn fail(mut self, reason: &str) {
         self.publish(Err(FlightError::Failed(Arc::from(reason))));
+    }
+
+    /// Publish a failure that must not be cached, so a later query can try again.
+    ///
+    /// Distinct from [`Self::fail`] because the two mean different things to the caller:
+    /// an upstream that is down should be remembered for a while (RFC 9520), whereas a
+    /// proof we could not finish must not be, or one interrupted lookup denies a name for
+    /// the whole failure TTL.
+    pub fn fail_uncacheable(mut self, reason: &str) {
+        self.publish(Err(FlightError::Transient(Arc::from(reason))));
     }
 
     fn publish(&mut self, value: Shared<V>) {
@@ -270,5 +301,43 @@ mod tests {
             Join::Follower(_) => "follower",
             Join::Saturated => "saturated",
         }
+    }
+
+    /// A failure that is about us must not be remembered as a failure of the name.
+    ///
+    /// Caching "I could not finish checking this" as "this name is broken" denies a
+    /// working name for the whole failure TTL, long after the interruption that caused it.
+    #[tokio::test]
+    async fn an_uncacheable_failure_says_so() {
+        let sf: Arc<SingleFlight<&'static str, u32>> = SingleFlight::new(4, 16);
+        let Join::Leader(leader) = sf.join("k") else {
+            panic!("first caller leads")
+        };
+        let Join::Follower(follower) = sf.join("k") else {
+            panic!("second caller follows")
+        };
+        leader.fail_uncacheable("proof could not be completed");
+
+        let err = follower.wait().await.expect_err("a failure was published");
+        assert!(
+            !err.is_cacheable(),
+            "an unfinished proof must not enter the failure cache"
+        );
+        assert_eq!(err.detail(), "proof could not be completed");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_failure_is_cacheable() {
+        let sf: Arc<SingleFlight<&'static str, u32>> = SingleFlight::new(4, 16);
+        let Join::Leader(leader) = sf.join("k") else {
+            panic!("first caller leads")
+        };
+        let Join::Follower(follower) = sf.join("k") else {
+            panic!("second caller follows")
+        };
+        leader.fail("upstream down");
+
+        let err = follower.wait().await.expect_err("a failure was published");
+        assert!(err.is_cacheable(), "RFC 9520 backoff still applies");
     }
 }

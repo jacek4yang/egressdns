@@ -49,6 +49,35 @@ impl FamilyState {
     }
 }
 
+/// Every address this host currently carries, loopback included.
+///
+/// Used to notice that a "gateway" is in fact ourselves, which is a forwarding loop
+/// waiting to happen. Reads the interface list directly rather than the cached snapshot,
+/// because it is consulted at startup before the detector has run.
+pub fn local_addresses() -> Vec<std::net::IpAddr> {
+    let mut out = vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    let Ok(output) = std::process::Command::new("ip")
+        .args(["-o", "addr", "show"])
+        .output()
+    else {
+        return out;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        // `2: enp2s0    inet 192.168.31.204/24 brd ...`
+        let Some(cidr) = fields.nth(3) else { continue };
+        let addr = cidr.split('/').next().unwrap_or(cidr);
+        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+            out.push(ip);
+        }
+    }
+    out
+}
+
 /// Raw observation of the host's network state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawNetworkState {

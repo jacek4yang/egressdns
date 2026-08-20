@@ -96,6 +96,98 @@ fn run(cli: Cli) -> Result<ExitCode> {
     })
 }
 
+/// Turn `upstreams = ["auto"]` into the resolvers this host should actually use.
+///
+/// Runs before bootstrap, so everything it produces goes through the same validation,
+/// cycle detection and address resolution as a hand-written list. If nothing usable is
+/// found the entry is left alone and configuration validation reports it, rather than the
+/// resolver starting with no routes and reporting itself healthy.
+async fn expand_auto(config: Config) -> Config {
+    use egressdns::config::{auto, autoprobe};
+
+    if !config.upstreams.iter().any(|u| u.trim() == "auto") {
+        return config;
+    }
+
+    let listeners: Vec<std::net::SocketAddr> = config
+        .server
+        .udp_listen
+        .iter()
+        .chain(config.server.tcp_listen.iter())
+        .copied()
+        .collect();
+
+    let instance: u64 = rand::random();
+    let (gateway, region) = tokio::join!(
+        autoprobe::probe_gateway(&listeners, instance),
+        autoprobe::detect_region()
+    );
+
+    match &gateway {
+        auto::GatewayProbe::Usable { addr, udp, tcp } => {
+            tracing::info!(
+                event = "auto.gateway_adopted",
+                address = %addr,
+                udp = udp,
+                tcp = tcp,
+                role = auto::ResolverRole::LocalForwarder.label(),
+                "using the local gateway as a fast source; it is not an independent authority"
+            );
+        }
+        auto::GatewayProbe::Rejected(why) => {
+            tracing::info!(event = "auto.gateway_rejected", reason = why.reason(),);
+        }
+    }
+    tracing::info!(event = "auto.region", region = ?region);
+
+    let expanded = auto::expand(&gateway, region);
+    tracing::info!(
+        event = "auto.expanded",
+        sources = expanded.len(),
+        entries = %expanded.join(", "),
+    );
+
+    let mut config = config;
+    let mut out: Vec<String> = Vec::new();
+    for entry in std::mem::take(&mut config.upstreams) {
+        if entry.trim() == "auto" {
+            out.extend(expanded.iter().cloned());
+        } else {
+            out.push(entry);
+        }
+    }
+    config.upstreams = out;
+    config.local_forwarder = gateway.address();
+
+    // Rebuild the derived route tree from the expanded list, and mark the route that came
+    // from the gateway. The mark is what stops a forwarder being used as a second
+    // opinion — it can be the fastest source on the network and still corroborate
+    // nothing, because it forwards to somebody, quite possibly whoever we just asked.
+    match egressdns::config::endpoint::build_upstreams(&config.upstreams) {
+        Ok(mut upstream) => {
+            if let Some(addr) = config.local_forwarder {
+                for group in &mut upstream.groups {
+                    for server in &mut group.servers {
+                        if server.addresses.contains(&addr) {
+                            server.role = auto::ResolverRole::LocalForwarder;
+                        }
+                    }
+                }
+            }
+            upstream.tls = config.tls.clone();
+            config.upstream = upstream;
+        }
+        Err(detail) => {
+            // Leave the configuration as it was rather than starting with no routes.
+            // Validation has already accepted the static `auto` expansion, so this can
+            // only mean the measured expansion is malformed — a bug here, not an
+            // operator error, and not a reason to take DNS down.
+            tracing::error!(event = "auto.expansion_invalid", detail = %detail);
+        }
+    }
+    config
+}
+
 fn init_logging(config: &Config, cli: &Cli) {
     let directive = cli
         .log
@@ -128,6 +220,8 @@ fn init_logging(config: &Config, cli: &Cli) {
 /// name should serve from the other two rather than refuse to start.
 async fn bootstrap(config: Config) -> Result<Config> {
     use egressdns::upstream::bootstrap as boot;
+
+    let config = expand_auto(config).await;
 
     let cycles = boot::detect_cycles(&config);
     if !cycles.is_empty() {

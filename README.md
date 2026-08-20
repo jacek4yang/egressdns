@@ -15,16 +15,18 @@ design contract, and it is tested.
 ## The whole configuration
 
 ```toml
-upstreams = ["builtin:recommended"]
+upstreams = ["auto"]
 
 proxies = []
 ```
 
-That is a complete, working file, and it is what the installer writes. `recommended`
-expands to five independently operated public resolvers with their plaintext seeds and
-their encrypted endpoints; `egressdnsctl builtins recommended` prints exactly what, and
-where each endpoint came from. Naming your own resolvers instead — or as well — is equally
-fine:
+That is a complete, working file. `auto` is worked out on the host at startup rather than
+guessed in a file: the local gateway when it answers DNS and does not forward back here,
+the regional resolvers that answer fastest, and independent encrypted resolvers so that not
+every source shares a jurisdiction. The gateway is adopted as a *source*, never as a second
+opinion — it forwards to somebody else, so agreeing with it corroborates nothing.
+
+Naming your own resolvers instead — or as well — is equally fine:
 
 ```toml
 upstreams = ["1.1.1.1", "https://dns.google/dns-query", "tls://dns.quad9.net"]
@@ -134,7 +136,7 @@ curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.s
   | sudo bash -s -- --non-interactive --mode lan --lan-cidr 192.168.1.0/24
 ```
 
-`--help` lists them all. Pin a version with `--version v2.0.1`, stage without starting with
+`--help` lists them all. Pin a version with `--version v3.0.0`, stage without starting with
 `--no-start`.
 
 The installer detects the architecture, downloads the matching tarball, verifies its
@@ -161,7 +163,7 @@ sudo /usr/local/lib/egressdns/uninstall.sh --purge
 ### From source
 
 ```sh
-tar -xzf egressdns-v2.0.1-source.tar.gz
+tar -xzf egressdns-v3.0.0-source.tar.gz
 cd egressdns
 cargo build --release --locked
 sudo ./install.sh --local-build

@@ -5,6 +5,8 @@
 //! fully deserialized tree before the configuration is ever activated, and activation
 //! itself is an atomic pointer swap (see [`crate::runtime::App`]).
 
+pub mod auto;
+pub mod autoprobe;
 pub mod builtins;
 mod defaults;
 pub mod endpoint;
@@ -43,6 +45,14 @@ pub struct Config {
     /// HTTP version, address family, direct or proxy path, and which endpoint to
     /// prefer are all decided from measurement.
     pub upstreams: Vec<String>,
+
+    /// The address `auto` adopted as the local forwarder, if any.
+    ///
+    /// Not an operator-facing setting — it is filled in at startup by gateway detection,
+    /// and exists so that the route built from that address carries
+    /// [`auto::ResolverRole::LocalForwarder`] and is never used as a second opinion.
+    #[serde(skip)]
+    pub local_forwarder: Option<IpAddr>,
     /// Egress proxies, tried when the direct path is unhealthy.
     ///
     /// `socks5://`, `socks5h://`, `http://` and `https://`. Which proxy is used, and
@@ -787,6 +797,13 @@ fn reject_legacy(raw: &toml::Value) -> Result<(), ConfigError> {
 pub struct UpstreamServerConfig {
     /// Operator-facing name; also used as the bounded metrics label.
     pub name: String,
+    /// What this resolver is to us: an independent authority, or the local forwarder.
+    ///
+    /// Set by `auto` when it adopts the gateway, and left at `Authority` otherwise. It is
+    /// not an operator-facing field: whether the machine at the end of the default route
+    /// is a full resolver or a forwarder is a fact about the network, not a preference.
+    #[serde(skip)]
+    pub role: crate::config::auto::ResolverRole,
     /// Transport used to reach the server.
     pub transport: TransportKind,
     /// Literal addresses of the server. Encrypted transports require these as bootstrap
@@ -819,6 +836,7 @@ impl Default for UpstreamServerConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            role: crate::config::auto::ResolverRole::Authority,
             transport: TransportKind::Udp,
             addresses: Vec::new(),
             port: None,
@@ -937,18 +955,29 @@ pub struct DnssecConfig {
     ///
     /// Costs one extra query, on cold unsigned NXDOMAINs only.
     pub corroborate_negative: bool,
+
+    /// How long a background proof completion may run.
+    ///
+    /// When a chain cannot be proved inside the foreground budget the answer is served
+    /// with AD cleared, and the proof is finished afterwards so the *next* query for that
+    /// zone has a warm chain and validates normally. This bounds that background work. It
+    /// is deliberately far larger than the foreground budget — nothing is waiting on it —
+    /// and still bounded, because nothing here is unbounded.
+    #[serde(with = "humantime_serde")]
+    pub proof_completion_timeout: Duration,
 }
 
 impl Default for DnssecConfig {
     fn default() -> Self {
         Self {
-            mode: DnssecMode::Validate,
+            mode: DnssecMode::Background,
             trust_anchor_file: None,
             trust_upstream_ad: false,
             max_concurrent_validations: 256,
             validation_cache_entries: 10_000,
             max_validation_depth: 12,
             corroborate_negative: true,
+            proof_completion_timeout: Duration::from_secs(20),
             extended_errors: true,
         }
     }
@@ -961,8 +990,53 @@ pub enum DnssecMode {
     /// No local validation. DO is not set unless the client sets it, and AD is cleared
     /// unless an explicitly trusted upstream policy applies.
     Off,
-    /// Validate locally against the configured trust anchors.
-    Validate,
+
+    /// Validate after answering, not before. The default.
+    ///
+    /// A client gets the fastest admissible answer; validation runs in the evidence plane
+    /// and decides what happens to that answer *next*. A variant proven Bogus is evicted
+    /// and quarantined, so it is served at most once and never again; a variant proven
+    /// Secure is promoted, and only then does an answer carry AD.
+    ///
+    /// This is the mode because synchronous validation could not keep its promise. Proving
+    /// a name at the end of a four-zone CNAME chain — `www.bing.com` is the case that
+    /// forced this — needs more sequential DS and DNSKEY lookups than a 2.5-second
+    /// foreground budget holds. The lookups were cut off, and the library reports a
+    /// cut-off lookup as `Proof::Bogus`, so the resolver refused a name it could resolve
+    /// perfectly well. Availability was being spent on a check that never finished.
+    Background,
+
+    /// Validate before answering, and fail closed. For operators who require it.
+    ///
+    /// Honest about its cost: a name whose chain does not fit the validation deadline is
+    /// refused. That is the correct trade for some deployments and the wrong one for most,
+    /// which is why it is not the default.
+    ///
+    /// Accepts the 2.x name `validate` as an alias. Somebody who wrote that chose
+    /// fail-closed deliberately, and a major version is no reason to silently give them
+    /// something else — or to refuse to start over a word.
+    #[serde(alias = "validate")]
+    Strict,
+}
+
+impl DnssecMode {
+    /// Whether a client waits for validation before being answered.
+    pub fn blocks_the_client(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+
+    /// Whether validation happens at all, in either plane.
+    pub fn validates(self) -> bool {
+        matches!(self, Self::Background | Self::Strict)
+    }
+
+    /// Whether outgoing queries should ask for DNSSEC records.
+    ///
+    /// True for `Background` as well as `Strict`: the evidence plane cannot validate what
+    /// the foreground did not ask for, and asking costs one EDNS flag.
+    pub fn wants_dnssec_records(self) -> bool {
+        self.validates()
+    }
 }
 
 // ---------------------------------------------------------------------------

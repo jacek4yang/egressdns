@@ -159,7 +159,7 @@ These sit at the root of the file, before any table. Together they are a complet
 working configuration.
 
 ```toml
-upstreams = ["builtin:recommended"]
+upstreams = ["auto"]
 
 proxies = []
 ```
@@ -168,7 +168,21 @@ There is no configuration version field. The format is identified by its content
 file from before 2.0 is refused by name with a pointer to
 [the migration guide](MIGRATION-V1-TO-V2.md) rather than half-applied.
 
-Each `upstreams` entry may be a built-in profile (`builtin:recommended`), a bare address
+`auto` is worked out on the host at startup rather than guessed in a file: the local
+gateway when it answers DNS and does not forward back here, the regional resolvers that
+answer fastest, and independent encrypted resolvers so that not every source shares a
+jurisdiction. Every entry it produces is a literal address or a name with its addresses
+pinned, so nothing needs DNS to reach DNS. `egressdnsctl upstreams` prints the result.
+
+The gateway is adopted as a **local forwarder**, not an authority. It is usually the
+fastest source on the network and the only one that answers for local names, but it
+forwards to somebody else — so agreeing with it proves only that it and we asked the same
+upstream. It therefore cannot corroborate an NXDOMAIN and is never used as a DNSSEC
+oracle. It is refused outright when it is one of this resolver's own listeners, or when it
+answers a per-instance probe that only an EgressDNS instance can answer, which means the
+query came home.
+
+Each `upstreams` entry may be `auto`, a built-in profile (`builtin:recommended`), a bare address
 (`1.1.1.1`, `1.1.1.1:5353`, `2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a
 provider alias (`cloudflare`, `google`, `quad9`, `adguard`), or a URI:
 
@@ -245,7 +259,7 @@ measured path health rather than configured.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `upstreams` | list of endpoint URI or `builtin:` profile | `[]` (empty) | Where to ask. At least one is required. |
+| `upstreams` | `auto`, endpoint URI, or `builtin:` profile | `[]` (empty) | Where to ask. At least one is required. |
 | `proxies` | list of proxy URI | `[]` (empty) | Egress proxies, tried when the direct path is unhealthy. |
 
 ### `[server]`
@@ -401,14 +415,38 @@ DNSSEC validation policy.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `mode` | string: `"validate"` \| `"passthrough"` \| `"off"` | `validate` | Validation mode. |
+| `mode` | string: `"background"` \| `"strict"` \| `"off"` | `background` | When validation happens relative to the client. See below. |
 | `trust_anchor_file` | path (optional) | unset | Replacement for the compiled-in IANA root anchors, in DNS presentation format — the same shape as the `root.key` written by `unbound-anchor`. **Fails closed**: if the file is missing, unreadable, or contains no usable DS or DNSKEY record, startup and reload are refused rather than silently falling back to the built-in anchors. Leave unset to use the compiled-in anchors. |
 | `trust_upstream_ad` | boolean | `false` | Trust an upstream's AD bit. Only honoured for servers that also set `trust_ad` and use an authenticated transport. |
 | `max_concurrent_validations` | integer | `256` | Global ceiling on DNSSEC validations running at once, enforced by a semaphore the resolver acquires before validating. A query that cannot get a permit inside the foreground budget is shed as SERVFAIL and counted in `dnssec_shed_total` rather than queueing without bound. **Restart-required**: the semaphore is created once at startup and shared by every resolver generation. |
 | `max_validation_depth` | integer | `12` | Maximum delegation depth followed while building a validation chain, which bounds the work one hostile zone can force. Applied as the request depth limit on every validating lookup. |
 | `validation_cache_entries` | integer | `10000` | Bound on the validation result cache. |
+| `proof_completion_timeout` | duration | `20s` | How long a background proof completion may run. When a chain cannot be proved inside `server.foreground_budget` the answer is served with AD cleared and the proof is finished afterwards, so the next query for that zone validates normally. Nothing waits on this, which is why it is far larger than the foreground budget. |
 | `corroborate_negative` | boolean | `true` | Ask a second, independent resolver authority before believing an unsigned NXDOMAIN. A forged negative is how a name is made to disappear and, unlike a forged address, leaves no evidence in the answer itself. Corroboration can only ever replace a negative with a positive, never the reverse, so it cannot be used to erase a name. Costs one extra query on cold unsigned NXDOMAINs only. |
 | `extended_errors` | boolean | `true` | Attach RFC 8914 Extended DNS Errors describing DNSSEC outcomes. |
+
+**`background` (default)** — a client gets the fastest admissible answer and validation
+follows in the evidence plane, where nobody is waiting. What it finds decides what happens
+to that answer *next*: a variant proven Bogus is evicted, so it is served at most once and
+never again; a variant proven Secure is promoted, and the next client to ask gets AD. A
+proof that could not be completed changes nothing, because "I could not check this" is not
+a statement about the answer.
+
+This is the default because synchronous validation could not keep the promise the
+foreground budget makes. Proving a name at the end of a four-zone CNAME chain —
+`www.bing.com` is the case that forced it — needs more sequential DS and DNSKEY lookups
+than 2.5 seconds holds. The lookups were cut off, the library reports a cut-off lookup as
+Bogus, and the resolver refused a name it could resolve perfectly well.
+
+**`strict`** — validate before answering, and fail closed. Honest about its cost: a name
+whose chain does not fit the validation deadline is refused. Correct for some deployments,
+wrong for most. Accepts the 2.x name `validate` as an alias, because somebody who wrote
+that chose fail-closed deliberately.
+
+**`off`** — no local validation.
+
+In every mode a confirmed Bogus verdict is refused; the modes differ in *when* the verdict
+is available, not in whether it is honoured.
 
 ### `[ecs]`
 

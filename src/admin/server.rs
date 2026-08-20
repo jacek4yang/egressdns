@@ -175,6 +175,10 @@ fn upstreams(app: &Arc<App>) -> serde_json::Value {
                     "transport": route.key.transport.label(),
                     "address": route.key.addr.to_string(),
                     "path": route.key.path.to_string(),
+                    "authority": route.key.authority.to_string(),
+                    // `local_forwarder` here is the answer to "why did my NXDOMAIN not
+                    // get corroborated?" — a forwarder is a source, not a second opinion.
+                    "role": route.key.role.label(),
                     "circuit": h.circuit().label(),
                     "samples": h.samples(),
                     "consecutive_failures": h.consecutive_failures(),

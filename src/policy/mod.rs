@@ -6,9 +6,11 @@
 
 pub mod answer;
 pub mod cloudflare;
+pub mod corroborate;
 pub mod dnssec;
 pub mod ttl;
 
 pub use answer::{apply_answer_policy, AnswerContext, AnswerOutcome, VerifiedCandidate};
+pub use corroborate::answers_are_compatible;
 pub use dnssec::dnssec_status;
 pub use ttl::{effective_client_ttl, TtlReason};
