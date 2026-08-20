@@ -26,9 +26,10 @@ use std::time::Duration;
 ///
 /// The distinction exists because "fastest source" and "independent authority" are
 /// different jobs, and a home gateway is emphatically the first without being the second.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ResolverRole {
     /// A full resolver we treat as an independent opinion.
+    #[default]
     Authority,
     /// The local network's forwarder — typically the default gateway.
     ///

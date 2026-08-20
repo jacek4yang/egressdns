@@ -515,9 +515,13 @@ impl Scheduler {
         let deadline = Instant::now() + budget;
         let ranked = self.rank(group, seed);
         let first = ranked.first().cloned()?;
+        // A second opinion has to be somebody else's opinion. A local forwarder is
+        // excluded even though it is a different authority string: it forwards to
+        // somebody, quite possibly the same somebody we just asked, so agreeing with it
+        // corroborates nothing.
         let second = ranked
             .iter()
-            .find(|r| r.key.authority != first.key.authority)
+            .find(|r| r.key.authority != first.key.authority && r.key.role.is_independent())
             .cloned()?;
 
         let run = |route: Arc<Route>, msg: Message| async move {
@@ -581,7 +585,7 @@ impl Scheduler {
         let ranked = self.rank(group, seed);
         let route = ranked
             .into_iter()
-            .find(|r| r.key.authority.as_ref() != exclude)?;
+            .find(|r| r.key.authority.as_ref() != exclude && r.key.role.is_independent())?;
 
         let result = self
             .attempt(

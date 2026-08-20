@@ -814,6 +814,20 @@ impl Resolver {
             specialuse::Disposition::NxDomain => {
                 msgutil::error_response(request, ResponseCode::NXDomain, true)
             }
+            specialuse::Disposition::LoopMarker => {
+                // Answered from local data so that a gateway forwarding to us produces an
+                // answer only we could have produced. See `config::auto`.
+                let mut msg = msgutil::response_skeleton(request, true);
+                if let Some(rdata) = specialuse::loop_marker_rdata(qtype) {
+                    msg.add_answer(hickory_proto::rr::Record::from_rdata(
+                        request.queries[0].name().clone(),
+                        // Never cached anywhere: this is a probe, not data.
+                        0,
+                        rdata,
+                    ));
+                }
+                msg
+            }
             specialuse::Disposition::Loopback => {
                 let mut msg = msgutil::response_skeleton(request, true);
                 if let Some(rdata) = specialuse::loopback_rdata(qtype) {
@@ -1455,7 +1469,7 @@ impl Resolver {
         // served at most once.
         if matches!(self.config.dnssec.mode, DnssecMode::Background) && !key.mode.checking_disabled
         {
-            self.spawn_background_validation(&key, message.clone(), options);
+            self.spawn_background_validation(key, message.clone(), options);
         }
 
         // A negative answer nobody signed is the classic forgery: it is how censorship,

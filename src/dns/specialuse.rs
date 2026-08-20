@@ -30,6 +30,17 @@ pub enum Disposition {
     Loopback,
     /// Answer NXDOMAIN locally and never query an upstream.
     NxDomain,
+    /// Answer with the loop-detection marker address.
+    ///
+    /// Only for names under [`crate::config::auto::LOOP_MARKER_SUFFIX`]. Answered
+    /// *positively*, which is the whole point: `auto` asks the local gateway for one of
+    /// these, and only an EgressDNS instance can produce an answer. Getting one back means
+    /// the gateway forwards to us, and adopting it as a source would close the loop.
+    ///
+    /// It has to be positive because the enclosing zone is `.invalid`, which every correct
+    /// resolver — including this one — answers with NXDOMAIN. An NXDOMAIN proves nothing;
+    /// an address proves the query came home.
+    LoopMarker,
 }
 
 /// The registry entry a name matched, used for metrics and logs.
@@ -129,6 +140,11 @@ pub fn classify(qname: &str) -> Option<(Registry, Disposition)> {
     if suffix_matches(&name, "localhost.") {
         return Some((Registry::Localhost, Disposition::Loopback));
     }
+    // Before the `.invalid` rule below, which would otherwise answer NXDOMAIN and hide
+    // the very signal this name exists to produce.
+    if crate::config::auto::is_loop_marker(&name) {
+        return Some((Registry::Invalid, Disposition::LoopMarker));
+    }
     for (suffix, registry) in NXDOMAIN_SUFFIXES {
         if suffix_matches(&name, suffix) {
             return Some((*registry, Disposition::NxDomain));
@@ -149,6 +165,18 @@ fn suffix_matches(name: &str, suffix: &str) -> bool {
             name.ends_with(suffix) && name.as_bytes().get(cut - 1) == Some(&b'.')
         }
         _ => false,
+    }
+}
+
+/// The address a loop-detection marker answers with.
+///
+/// TEST-NET-1 (RFC 5737), which is documentation space: it routes nowhere, so an answer
+/// that escapes into a cache harms nothing, and it is unmistakable in a packet capture.
+pub fn loop_marker_rdata(qtype: RecordType) -> Option<hickory_proto::rr::RData> {
+    use hickory_proto::rr::{rdata, RData};
+    match qtype {
+        RecordType::A => Some(RData::A(rdata::A(std::net::Ipv4Addr::new(192, 0, 2, 53)))),
+        _ => None,
     }
 }
 
@@ -264,5 +292,32 @@ mod tests {
             assert!(seen.insert(r.label()), "duplicate label {}", r.label());
             assert!(r.label().len() <= 16);
         }
+    }
+}
+
+#[cfg(test)]
+mod loop_marker_tests {
+    use super::*;
+
+    /// The gateway loop probe must be answered *positively*, or the signal it exists to
+    /// produce is indistinguishable from the `.invalid` NXDOMAIN every resolver gives.
+    #[test]
+    fn a_loop_marker_is_answered_positively_despite_being_under_invalid() {
+        let name = "deadbeefdeadbeef.loop-probe.egressdns.invalid.";
+        assert_eq!(
+            classify(name),
+            Some((Registry::Invalid, Disposition::LoopMarker)),
+            "the marker must outrank the .invalid NXDOMAIN rule"
+        );
+        assert!(loop_marker_rdata(RecordType::A).is_some());
+    }
+
+    /// Any other name under `.invalid` is still NXDOMAIN.
+    #[test]
+    fn an_ordinary_invalid_name_is_still_nxdomain() {
+        assert_eq!(
+            classify("something.invalid."),
+            Some((Registry::Invalid, Disposition::NxDomain))
+        );
     }
 }

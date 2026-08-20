@@ -45,6 +45,14 @@ pub struct Config {
     /// HTTP version, address family, direct or proxy path, and which endpoint to
     /// prefer are all decided from measurement.
     pub upstreams: Vec<String>,
+
+    /// The address `auto` adopted as the local forwarder, if any.
+    ///
+    /// Not an operator-facing setting — it is filled in at startup by gateway detection,
+    /// and exists so that the route built from that address carries
+    /// [`auto::ResolverRole::LocalForwarder`] and is never used as a second opinion.
+    #[serde(skip)]
+    pub local_forwarder: Option<IpAddr>,
     /// Egress proxies, tried when the direct path is unhealthy.
     ///
     /// `socks5://`, `socks5h://`, `http://` and `https://`. Which proxy is used, and
@@ -789,6 +797,13 @@ fn reject_legacy(raw: &toml::Value) -> Result<(), ConfigError> {
 pub struct UpstreamServerConfig {
     /// Operator-facing name; also used as the bounded metrics label.
     pub name: String,
+    /// What this resolver is to us: an independent authority, or the local forwarder.
+    ///
+    /// Set by `auto` when it adopts the gateway, and left at `Authority` otherwise. It is
+    /// not an operator-facing field: whether the machine at the end of the default route
+    /// is a full resolver or a forwarder is a fact about the network, not a preference.
+    #[serde(skip)]
+    pub role: crate::config::auto::ResolverRole,
     /// Transport used to reach the server.
     pub transport: TransportKind,
     /// Literal addresses of the server. Encrypted transports require these as bootstrap
@@ -821,6 +836,7 @@ impl Default for UpstreamServerConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            role: crate::config::auto::ResolverRole::Authority,
             transport: TransportKind::Udp,
             addresses: Vec::new(),
             port: None,
@@ -995,6 +1011,11 @@ pub enum DnssecMode {
     /// Honest about its cost: a name whose chain does not fit the validation deadline is
     /// refused. That is the correct trade for some deployments and the wrong one for most,
     /// which is why it is not the default.
+    ///
+    /// Accepts the 2.x name `validate` as an alias. Somebody who wrote that chose
+    /// fail-closed deliberately, and a major version is no reason to silently give them
+    /// something else — or to refuse to start over a word.
+    #[serde(alias = "validate")]
     Strict,
 }
 

@@ -157,6 +157,34 @@ async fn expand_auto(config: Config) -> Config {
         }
     }
     config.upstreams = out;
+    config.local_forwarder = gateway.address();
+
+    // Rebuild the derived route tree from the expanded list, and mark the route that came
+    // from the gateway. The mark is what stops a forwarder being used as a second
+    // opinion — it can be the fastest source on the network and still corroborate
+    // nothing, because it forwards to somebody, quite possibly whoever we just asked.
+    match egressdns::config::endpoint::build_upstreams(&config.upstreams) {
+        Ok(mut upstream) => {
+            if let Some(addr) = config.local_forwarder {
+                for group in &mut upstream.groups {
+                    for server in &mut group.servers {
+                        if server.addresses.contains(&addr) {
+                            server.role = auto::ResolverRole::LocalForwarder;
+                        }
+                    }
+                }
+            }
+            upstream.tls = config.tls.clone();
+            config.upstream = upstream;
+        }
+        Err(detail) => {
+            // Leave the configuration as it was rather than starting with no routes.
+            // Validation has already accepted the static `auto` expansion, so this can
+            // only mean the measured expansion is malformed — a bug here, not an
+            // operator error, and not a reason to take DNS down.
+            tracing::error!(event = "auto.expansion_invalid", detail = %detail);
+        }
+    }
     config
 }
 

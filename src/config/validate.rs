@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::error::ConfigError;
 use crate::util::ipclass;
 
-use super::{AnyPolicy, CloudflareMode, Config, DnssecMode, EcsMode, ProbeProfile, TransportKind};
+use super::{AnyPolicy, CloudflareMode, Config, EcsMode, ProbeProfile, TransportKind};
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> ConfigError {
     ConfigError::invalid(path, message)
