@@ -64,7 +64,6 @@ GENERATED_CONFIG=""         # set when the installer wrote the configuration its
 EXISTING_INSTALL=0
 EXISTING_VERSION=""
 SYSTEM_RESOLVER_UNIT=""
-SYSTEM_RESOLVER_WAS_ACTIVE=0
 RESOLV_CONF_BACKUP=""
 DETECTED_LAN_CIDRS=""
 
@@ -489,13 +488,11 @@ detect_existing_install() {
 # elsewhere is a perfectly reasonable outcome — and is the default.
 detect_system_resolver() {
     SYSTEM_RESOLVER_UNIT=""
-    SYSTEM_RESOLVER_WAS_ACTIVE=0
     [ -n "$ROOT_PREFIX" ] && return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for unit in systemd-resolved dnsmasq unbound bind9 named pdns-recursor connman; do
         if systemctl is-active --quiet "${unit}.service" 2>/dev/null; then
             SYSTEM_RESOLVER_UNIT="$unit"
-            SYSTEM_RESOLVER_WAS_ACTIVE=1
             return 0
         fi
     done
@@ -940,7 +937,8 @@ install_files() {
         warn "no systemd unit found in the archive or source tree"
     fi
 
-    local target="$(path "$CONF_DIR")/config.toml"
+    local target
+    target="$(path "$CONF_DIR")/config.toml"
     if [ -f "$target" ] && [ "$REPLACE_EXISTING" -eq 0 ]; then
         log "keeping the existing configuration at $CONF_DIR/config.toml"
     else
@@ -976,7 +974,8 @@ install_files() {
 # destroying the only route back.
 apply_purges() {
     if [ "${PURGE_OLD_STATE:-0}" -eq 1 ]; then
-        local dir="$(path "$STATE_DIR")"
+        local dir
+        dir="$(path "$STATE_DIR")"
         if [ -d "$dir" ]; then
             log "discarding learned route quality and cached data in $STATE_DIR"
             find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
@@ -1319,6 +1318,14 @@ health_check() {
 }
 
 summary() {
+    # Report what is actually in the file. An operator who passed --config, or who kept
+    # their existing configuration, did not get the built-in set and must not be told they
+    # did — the summary is the only place most installs are ever read.
+    local RESOLVER_SUMMARY="builtin:${PROFILE}"
+    if [ "${GENERATED_CONFIG:-0}" -ne 1 ]; then
+        RESOLVER_SUMMARY="as configured in $CONF_DIR/config.toml"
+    fi
+
     local listeners="127.0.0.1:53"
     [ "$MODE" = "lan" ] && listeners="$(listen_addresses_v4)"
     [ "$LISTEN_V6_ALL" -eq 1 ] && listeners="$listeners [::]:53"
@@ -1330,7 +1337,7 @@ EgressDNS is installed and answering.
   mode            ${MODE}
   listening on    ${listeners}
   clients         ${LAN_CIDRS:-this machine only (loopback)}
-  resolvers       builtin:${PROFILE}
+  resolvers       ${RESOLVER_SUMMARY}
   proxies         none configured
   DNSSEC          Bogus answers rejected${DNSSEC_SECURE_RESULT:+; validation ${DNSSEC_SECURE_RESULT}}
   system resolver ${SYSTEM_RESOLVER_ACTION}${SYSTEM_RESOLVER_UNIT:+ (${SYSTEM_RESOLVER_UNIT} was running)}
