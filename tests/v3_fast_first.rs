@@ -272,3 +272,75 @@ async fn background_mode_answers_where_strict_mode_refuses() {
         "an answer that has not been validated must not claim AD"
     );
 }
+
+/// A negative nobody could corroborate must not persist.
+///
+/// The asymmetry that makes this worth its own rule: a forged positive sends a client
+/// somewhere wrong, where TLS usually stops it, while a forged negative makes a name cease
+/// to exist and leaves nothing in the answer to notice. With one reachable resolver every
+/// negative is single-source, so refusing to serve it would be its own outage — it is
+/// served, and then forgotten almost immediately.
+#[tokio::test]
+async fn an_uncorroborated_negative_is_cached_only_briefly() {
+    let upstream = MockUpstream::new();
+    upstream.set(
+        "gone.test.",
+        RecordType::A,
+        // An SOA minimum of an hour: what the zone would like us to remember.
+        Behaviour::NxDomain { minimum: 3600 },
+    );
+    let ca = TestCa::new();
+    let server = common::start_mock(upstream.clone(), &ca, "mock.test", Transports::plain()).await;
+    let daemon = Daemon::start(&common::udp_upstream_fragment(
+        server.udp.expect("udp listener"),
+    ))
+    .await;
+
+    let response = daemon
+        .query_udp(&common::query("gone.test.", RecordType::A, false))
+        .await;
+    assert_eq!(
+        response.metadata.response_code,
+        hickory_proto::op::ResponseCode::NXDomain
+    );
+
+    // Whatever TTL the client is given, it must be nothing like the hour the zone asked
+    // for: one unverifiable source does not get to erase a name for an hour.
+    let ttl = response
+        .authorities
+        .iter()
+        .map(|r| r.ttl)
+        .min()
+        .unwrap_or(u32::MAX);
+    assert!(
+        ttl <= 60,
+        "an uncorroborated negative was cached for {ttl}s; a single source does not get \
+         to erase a name for that long"
+    );
+}
+
+/// The other half: a positive answer is not subject to the negative rule.
+#[tokio::test]
+async fn a_positive_answer_keeps_its_ttl() {
+    let upstream = MockUpstream::new();
+    upstream.set(
+        "kept.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("kept.test.", 3600, "192.0.2.70")]),
+    );
+    let ca = TestCa::new();
+    let server = common::start_mock(upstream.clone(), &ca, "mock.test", Transports::plain()).await;
+    let daemon = Daemon::start(&common::udp_upstream_fragment(
+        server.udp.expect("udp listener"),
+    ))
+    .await;
+
+    let response = daemon
+        .query_udp(&common::query("kept.test.", RecordType::A, false))
+        .await;
+    let ttl = response.answers.iter().map(|r| r.ttl).min().unwrap_or(0);
+    assert!(
+        ttl > 60,
+        "a positive answer must keep a usable TTL, saw {ttl}s"
+    );
+}

@@ -4,6 +4,90 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-08-20
+
+**The resolver answers first and proves afterwards.** A client gets the fastest admissible
+answer; DNSSEC, corroboration and measurement decide what happens to that answer *next*.
+
+### Why the default changed
+
+`www.bing.com` returned SERVFAIL on a host that resolved it perfectly well with `+cd`. So
+did `www.microsoft.com`, `www.amazon.com`, `www.apple.com` and `www.netflix.com`. None of
+it was a DNSSEC failure. Proving a name at the end of a four-zone CNAME chain needs more
+sequential DS and DNSKEY lookups than a 2.5-second foreground budget holds; the last was
+cut off; hickory reports a cut-off lookup as `Proof::Bogus`; and the resolver refused a
+name it could resolve. Availability was being spent on a check that never finished.
+
+Synchronous validation cannot keep the promise `server.foreground_budget` makes, so it is
+no longer where validation happens.
+
+### Breaking
+
+* **`dnssec.mode` defaults to `background`.** Validation runs after the client has been
+  answered. `strict` is the old fail-closed behaviour and is still available; the 2.x name
+  `validate` is accepted as an alias for it, because somebody who wrote that chose
+  fail-closed deliberately.
+* **The generated configuration is `upstreams = ["auto"]`.** Existing configurations are
+  unaffected — every 2.x form still parses.
+
+### Added
+
+* **`auto`**, resolved on the host at startup rather than guessed in a file: the local
+  gateway when it answers DNS and does not forward back here, the regional resolvers that
+  answer fastest, and independent encrypted resolvers so that not every source shares a
+  jurisdiction. Every entry is a literal address or a name with its addresses pinned, so
+  nothing needs DNS to reach DNS.
+* **`ResolverRole::LocalForwarder`.** The gateway is adopted as a source, never as a second
+  opinion: it forwards to somebody else, quite possibly whoever we just asked, so agreeing
+  with it corroborates nothing. It can be the fastest resolver on the network and still not
+  be an authority, and both halves are enforced — it is excluded from corroboration and is
+  never a DNSSEC oracle.
+* **Forwarding-loop detection.** A gateway is refused when it is one of our own listeners,
+  or when it answers a per-instance marker under `.invalid` that only an EgressDNS instance
+  can answer — which means the query came home. Per-instance so two resolvers pointed at
+  each other each detect the other rather than both matching one constant.
+* **The evidence plane.** Background validation promotes a variant to Secure (the next
+  client gets AD), records ProvenInsecure, or evicts a variant proven Bogus so it is served
+  at most once and never again. A proof that could not be completed changes nothing.
+* **A negative-answer evidence model.** A negative no second authority could corroborate is
+  served — refusing would be its own outage — and then forgotten within seconds instead of
+  for the zone's negative TTL. A forged negative erases a name and leaves nothing in the
+  answer to notice, which is why it gets its own rule.
+
+### Measured
+
+On the author's host, against the baselines the brief names, over a 30-name corpus of
+Chinese and global services, CDN chains, signed and unsigned zones:
+
+| | cold success | cold avg | warm p50 | warm p99 |
+| --- | --- | --- | --- | --- |
+| **EgressDNS 3.0.0 (`auto`)** | **30/30** | **21.3 ms** | **31 µs** | **130 µs** |
+| 192.168.31.1 (gateway) | 30/30 | 43.3 ms | 499 µs | 547 µs |
+| 223.5.5.5 | 30/30 | 40.8 ms | 11.5 ms | 11.6 ms |
+
+Warm figures are 200 queries for one name with no process startup inside the measurement.
+Success rate equals both baselines; cold latency is about half; a cache hit is 16× faster
+than the gateway and 370× faster than the regional resolver. After the run: RSS 15.8 MB,
+15 file descriptors, 7 threads.
+
+`www.bing.com`: SERVFAIL after 2.5 s → **NOERROR in 221 ms**.
+
+### Known limitations
+
+Substantial parts of the 3.0 brief are **not** in this release, and are listed so nobody
+has to discover them:
+
+* The optimization plane is 2.x machinery, not the v3 redesign: no ICMP/TCP/TLS/QUIC
+  ranking rework, no ALPN or ECH keying of service quality.
+* No ECH or SVCB service binding for DoH endpoints.
+* Cloudflare optimization has not been generalised behind a CDN evidence interface.
+* Hot-domain prefetch is the 2.x hit-count design, not expected-benefit.
+* The resource governor does not yet have three separately reserved budgets.
+* The installer still writes `builtin:recommended` rather than `auto`, and its canaries do
+  not yet include `www.bing.com`.
+* No soak, no differential testing against Unbound or Knot, no returned-IP connection
+  quality comparison.
+
 ## [2.0.1] — 2026-08-20
 
 A default install now produces a resolver that works, and an installer that says so only

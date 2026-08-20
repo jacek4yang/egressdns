@@ -7,14 +7,19 @@
 #
 # Replace the example prefixes with your own before using this.
 
-# The built-in "recommended" set: five independently operated public resolvers, each
-# with its plaintext seeds and its encrypted endpoints. `egressdnsctl builtins` lists
-# what it expands to and where each endpoint came from.
+# Where to ask. `auto` works it out on this host at startup: the local gateway when it
+# answers DNS and does not forward back here, the regional resolvers that answer fastest,
+# and independent encrypted resolvers so that not every source shares a jurisdiction.
+# Every entry is a literal address or a name with its addresses pinned, so nothing here
+# needs DNS to reach DNS.
 #
-# Naming your own is equally fine, and mixing the two is fine too:
+# `egressdnsctl upstreams` prints what it expanded to on this machine.
 #
+# Naming your own is equally fine, and mixing is fine too:
+#
+#   upstreams = ["192.168.31.1", "223.5.5.5", "https://dns.alidns.com/dns-query"]
 #   upstreams = ["builtin:recommended", "tls://dns.internal.example?addr=10.0.0.53"]
-upstreams = ["builtin:recommended"]
+upstreams = ["auto"]
 
 proxies = []
 

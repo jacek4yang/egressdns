@@ -173,6 +173,31 @@ impl FailureReport {
     }
 }
 
+/// How well supported a negative answer is.
+///
+/// Negatives get their own type because they are the asymmetric case: a forged positive
+/// sends a client somewhere wrong, where TLS will usually stop it, while a forged negative
+/// makes a name cease to exist and leaves nothing in the answer to notice. So the evidence
+/// behind one determines how long it is allowed to persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NegativeEvidence {
+    /// Not a negative answer at all.
+    NotNegative,
+    /// An authenticated denial of existence. Proves itself.
+    Proven,
+    /// A second independent authority agreed.
+    Corroborated,
+    /// One source said so, and nothing else could be asked.
+    SingleSource,
+}
+
+/// How long an uncorroborated negative may be cached.
+///
+/// Deliberately far below any sensible SOA minimum. Long enough to absorb a retry storm
+/// from one client, short enough that a name which briefly vanished comes back on its own
+/// rather than staying gone for the zone's negative TTL.
+const PROVISIONAL_NEGATIVE_TTL: u32 = 5;
+
 /// The foreground resolver.
 pub struct Resolver {
     /// Active configuration.
@@ -1478,7 +1503,7 @@ impl Resolver {
         // unsigned NXDOMAIN is trusted, a *different resolver authority* is asked. A
         // Secure or Insecure-with-proof answer needs none of this, and neither does a
         // positive one: this is the case where a second opinion is worth the query.
-        let (response, route) = self
+        let (response, route, negative_evidence) = self
             .corroborate_negative(&group, &message, options, &response, status, route, seed)
             .await;
 
@@ -1493,7 +1518,21 @@ impl Resolver {
             // reloads, so a value captured into it would silently ignore a reload.
             _ => self.config.cache.negative_max_ttl,
         };
-        let ttl = raw_ttl.min(cap);
+        let mut ttl = raw_ttl.min(cap);
+
+        // A negative nobody could corroborate is the shape a forged answer takes, and it
+        // is the one that erases a name rather than redirecting it. Refusing to serve it
+        // would be its own outage — on a network with one reachable resolver, every
+        // negative is single-source — so it is served and then forgotten almost
+        // immediately, which is the difference between a bad minute and a bad hour.
+        if negative_evidence == NegativeEvidence::SingleSource {
+            ttl = ttl.min(PROVISIONAL_NEGATIVE_TTL);
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "negative_provisional",
+            )
+            .increment(1);
+        }
 
         let now = Instant::now();
         let now_unix = crate::util::time::SystemClock.unix_secs_now();
@@ -1565,17 +1604,31 @@ impl Resolver {
         status: DnssecStatus,
         route: Option<crate::upstream::pool::RouteKey>,
         seed: u64,
-    ) -> (Message, Option<crate::upstream::pool::RouteKey>) {
-        let original = (response.clone(), route.clone());
+    ) -> (
+        Message,
+        Option<crate::upstream::pool::RouteKey>,
+        NegativeEvidence,
+    ) {
+        let original = (
+            response.clone(),
+            route.clone(),
+            NegativeEvidence::SingleSource,
+        );
 
-        if !self.config.dnssec.corroborate_negative {
-            return original;
+        // Anything that is not an unsigned negative needs nothing from this function. A
+        // signed denial proves itself, and a positive answer is not the shape a forged
+        // negative takes.
+        if response.metadata.response_code != ResponseCode::NXDomain {
+            return (
+                response.clone(),
+                route.clone(),
+                NegativeEvidence::NotNegative,
+            );
         }
-        // Only unsigned negatives. A signed answer already proves itself, and a positive
-        // answer is not the shape this defends against.
-        if response.metadata.response_code != ResponseCode::NXDomain
-            || status == DnssecStatus::Secure
-        {
+        if status == DnssecStatus::Secure {
+            return (response.clone(), route.clone(), NegativeEvidence::Proven);
+        }
+        if !self.config.dnssec.corroborate_negative {
             return original;
         }
         let Some(first) = route.as_ref() else {
@@ -1619,7 +1672,11 @@ impl Resolver {
                 "outcome" => "agreed",
             )
             .increment(1);
-            return original;
+            return (
+                response.clone(),
+                route.clone(),
+                NegativeEvidence::Corroborated,
+            );
         }
 
         if second.message.metadata.response_code == ResponseCode::NoError
@@ -1639,7 +1696,11 @@ impl Resolver {
                 second = %second.route.authority,
                 "an unsigned NXDOMAIN was contradicted by an independent resolver",
             );
-            return (second.message, Some(second.route));
+            return (
+                second.message,
+                Some(second.route),
+                NegativeEvidence::NotNegative,
+            );
         }
 
         metrics::counter!(
