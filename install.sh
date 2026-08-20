@@ -1105,6 +1105,10 @@ CANARY_LAST=""
 # The question a local canary asks is "is the resolver on *this machine* answering".
 # Through an intermediary it answers a different question. Downloads keep the proxy; this
 # does not. See docs/incidents/2026-08-installer-tcp-canary.md.
+# Set for a check whose *failure* is the passing result, so the expected outcome is not
+# reported as a warning. A DNSSEC-bogus name failing to resolve is the resolver working.
+CANARY_EXPECT_FAILURE=0
+
 canary() {
     local host="$1" port="$2" proto="$3" name="${4:-localhost}" want_dnssec="${5:-}"
     local args=(query "$name" --server "$host" --port "$port" --require-answer --wait 6 --json)
@@ -1117,7 +1121,9 @@ canary() {
         -u HTTPS_PROXY -u https_proxy \
         "$(path "$BIN_DIR")/$CONTROL" "${args[@]}" 2>&1)" && return 0
 
-    warn "${proto} canary for ${name} against ${host}:${port} did not return a usable answer"
+    if [ "$CANARY_EXPECT_FAILURE" -eq 0 ]; then
+        warn "${proto} canary for ${name} against ${host}:${port} did not return a usable answer"
+    fi
     return 1
 }
 
@@ -1212,22 +1218,28 @@ external_canaries() {
 # A name that must fail DNSSEC validation, proving the resolver fails closed rather than
 # serving an answer it could not authenticate.
 canary_dnssec_bogus() {
-    local host="$1" port="$2"
-    if canary "$host" "$port" "udp" "dnssec-failed.org" "dnssec"; then
+    local host="$1" port="$2" rc=0
+    CANARY_EXPECT_FAILURE=1
+    canary "$host" "$port" "udp" "dnssec-failed.org" "dnssec" && rc=1
+    CANARY_EXPECT_FAILURE=0
+    if [ "$rc" -eq 1 ]; then
         warn "a deliberately DNSSEC-bogus name was answered; validation is not failing closed"
         return 1
     fi
+    log "a DNSSEC-bogus name was refused, as it must be"
     return 0
 }
 
 # A signed name should carry AD when validation is on. Advisory: a network that filters
 # DNSSEC records can fail this without the installation being wrong.
 canary_dnssec_secure() {
-    local host="$1" port="$2"
-    if canary "$host" "$port" "udp" "cloudflare.com" "dnssec"; then
-        return 0
-    fi
-    return 1
+    local host="$1" port="$2" rc=0
+    # Advisory, so a failure here is reported by the caller in its own words rather than
+    # as a warning that reads like something broke.
+    CANARY_EXPECT_FAILURE=1
+    canary "$host" "$port" "udp" "cloudflare.com" "dnssec" || rc=1
+    CANARY_EXPECT_FAILURE=0
+    return "$rc"
 }
 
 # Poll for real readiness with bounded exponential backoff.
