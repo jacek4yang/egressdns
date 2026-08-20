@@ -213,13 +213,43 @@ rollback() {
     done
     if [ -f "$BACKUP_DIR/config.toml" ]; then
         install -m 0640 "$BACKUP_DIR/config.toml" "$(path "$CONF_DIR")/config.toml"
+        # `install` run as root leaves the file root:root. The service runs as
+        # $SERVICE_USER and reads the config through its *group*, so without this the
+        # restored configuration is unreadable to the daemon and the rollback leaves DNS
+        # down while reporting success. Found by exercising a failed cutover.
+        if [ -z "$ROOT_PREFIX" ] && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+            chown "root:$SERVICE_USER" "$(path "$CONF_DIR")/config.toml" || true
+        fi
     fi
     if [ -f "$BACKUP_DIR/egressdns.service" ]; then
         install -m 0644 "$BACKUP_DIR/egressdns.service" "$(path "$UNIT_PATH")"
     fi
     if [ -z "$ROOT_PREFIX" ]; then
         systemctl daemon-reload || true
-        systemctl restart egressdns.service 2>/dev/null || true
+        # A unit that has just failed repeatedly is rate-limited: systemd refuses to
+        # start it again until the failure is cleared. Without this the restart is
+        # silently declined and the rollback ends with the service dead.
+        systemctl reset-failed egressdns.service >/dev/null 2>&1 || true
+        systemctl start egressdns.service >/dev/null 2>&1 || true
+
+        # Rollback is the last line of defence, so it verifies itself rather than
+        # assuming. If the previous version does not come back, say so plainly: an
+        # operator who believes a rollback worked will not go looking.
+        local recovered=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if systemctl is-active --quiet egressdns.service; then
+                recovered=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$recovered" -eq 1 ]; then
+            log "rolled back; the previous version is running again"
+        else
+            warn "ROLLBACK INCOMPLETE: the previous version did not start."
+            warn "The previous binary, unit and configuration have been restored."
+            warn "Inspect: systemctl status egressdns; journalctl -xeu egressdns"
+        fi
     fi
 }
 

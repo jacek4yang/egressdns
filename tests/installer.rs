@@ -196,3 +196,47 @@ async fn the_canary_fails_when_nothing_is_listening() {
     };
     assert!(!result, "a dead address must not pass the canary");
 }
+
+/// Rollback must restore a *working* service, not merely the right files.
+///
+/// Exercising a genuinely failed cutover on a real host found two defects that both left
+/// DNS down while the installer reported the rollback had succeeded:
+///
+///   * the restored configuration was written by `install` running as root, which leaves
+///     it `root:root` — the daemon reads it through its *group*, so the previous
+///     configuration came back unreadable;
+///   * a unit that has just failed repeatedly is rate-limited by systemd, so the restart
+///     was silently declined and the service stayed dead.
+///
+/// This is a source-level guard for both, plus the self-verification that turns a silent
+/// half-rollback into a loud one. The end-to-end behaviour is exercised on a real host,
+/// which a unit test cannot do.
+#[test]
+fn rollback_restores_ownership_resets_failure_state_and_verifies_itself() {
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
+        .expect("install.sh must exist");
+
+    let start = script
+        .find("\nrollback() {")
+        .expect("install.sh must define rollback()");
+    let body = &script[start..];
+    let end = body.find("\n}\n").expect("rollback() must be terminated");
+    let rollback = &body[..end];
+
+    assert!(
+        rollback.contains("chown \"root:$SERVICE_USER\""),
+        "rollback must restore the configuration's group, or the daemon cannot read it:\n{rollback}"
+    );
+    assert!(
+        rollback.contains("systemctl reset-failed"),
+        "rollback must clear the failed state, or systemd refuses the restart:\n{rollback}"
+    );
+    assert!(
+        rollback.contains("is-active --quiet"),
+        "rollback must verify the service actually came back:\n{rollback}"
+    );
+    assert!(
+        rollback.contains("ROLLBACK INCOMPLETE"),
+        "a rollback that did not recover must say so plainly:\n{rollback}"
+    );
+}
