@@ -174,6 +174,7 @@ fn upstreams(app: &Arc<App>) -> serde_json::Value {
                     "server": route.key.server.to_string(),
                     "transport": route.key.transport.label(),
                     "address": route.key.addr.to_string(),
+                    "path": route.key.path.to_string(),
                     "circuit": h.circuit().label(),
                     "samples": h.samples(),
                     "consecutive_failures": h.consecutive_failures(),

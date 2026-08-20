@@ -89,6 +89,20 @@ pub struct Scheduler {
     relearn_window: Duration,
 }
 
+/// Score added to a route that leaves through a proxy.
+///
+/// Deliberately smaller than the failure term a route earns by not working, so it orders
+/// direct ahead of proxied while both are healthy and gets out of the way the moment the
+/// direct path degrades.
+const PROXY_PATH_PENALTY_MS: f64 = 120.0;
+
+fn proxy_penalty(route: &Route) -> f64 {
+    match route.egress {
+        crate::upstream::egress::EgressPath::Direct => 0.0,
+        crate::upstream::egress::EgressPath::Proxy(_) => PROXY_PATH_PENALTY_MS,
+    }
+}
+
 /// How much exploration is multiplied by during accelerated relearning.
 const RELEARN_EXPLORE_MULTIPLIER: f64 = 5.0;
 
@@ -357,6 +371,12 @@ impl Scheduler {
                 h.tick(now, &group.scheduler, seed ^ (idx as u64));
                 (h.is_usable(), h.score(route.weight), h.is_measured())
             });
+            // A proxied route starts behind the direct one to the same server. Not
+            // because a proxy is worse, but because it is an extra hop the operator
+            // added for when the direct path stops working — so direct is preferred
+            // while it is healthy, and a direct route that starts failing accumulates a
+            // far larger penalty than this and loses on its own merits.
+            let score = score + proxy_penalty(route);
             let bucket = if !family_ok {
                 Bucket::FamilyExcluded
             } else if usable {
@@ -859,13 +879,7 @@ impl Scheduler {
 
         let sent = outgoing.clone();
         let sent_result = route
-            .send(
-                self.registry.provider(),
-                self.registry.context(),
-                outgoing,
-                options,
-                send_timeout,
-            )
+            .send(self.registry.context(), outgoing, options, send_timeout)
             .await;
         // Terminal locally: response, transport error or timeout. The slot is free now.
         exchange.complete();
@@ -1003,7 +1017,8 @@ mod tests {
         };
         let roots = Arc::new(crate::tls::root_store(false, &[]).expect("roots"));
         let registry = Arc::new(
-            UpstreamRegistry::build(&cfg, roots, Duration::from_secs(2), 1232).expect("registry"),
+            UpstreamRegistry::build(&cfg, &[], roots, Duration::from_secs(2), 1232)
+                .expect("registry"),
         );
         let group = registry.default_group().expect("group");
         (registry, group)

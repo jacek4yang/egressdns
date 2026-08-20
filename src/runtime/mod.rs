@@ -237,6 +237,7 @@ impl App {
         let registry = Arc::new(
             UpstreamRegistry::build(
                 &config.upstream,
+                &config.proxy,
                 Arc::clone(&roots),
                 query_timeout,
                 config.server.udp.max_payload,
