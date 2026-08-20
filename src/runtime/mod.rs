@@ -65,6 +65,9 @@ pub struct App {
     pub singleflight: Arc<SingleFlight<CacheKey, Arc<CacheEntry>>>,
     /// Address quality evidence.
     pub quality: Arc<QualityStore>,
+    /// Which names are known to be web services. Long-lived learned state, so it is owned
+    /// by the process rather than rebuilt from configuration on every reload.
+    pub services: crate::ranking::service::SharedServiceClassifier,
     /// Hot-name tracking.
     pub hotset: SharedHotSet,
     /// Dataset snapshots.
@@ -121,6 +124,9 @@ impl App {
         let singleflight =
             SingleFlight::new(64, (config.resources.max_inflight_queries / 64).max(64));
         let quality = Arc::new(QualityStore::new(config.cache.quality_max_entries as usize));
+        let services: crate::ranking::service::SharedServiceClassifier = Arc::new(
+            crate::ranking::service::ServiceClassifier::new(config.prefetch.hot_set_size),
+        );
         let hotset: SharedHotSet = Arc::new(HotSet::new(
             config.prefetch.hot_set_size,
             600.0,
@@ -170,6 +176,7 @@ impl App {
             Arc::clone(&network),
             Arc::clone(&cloudflare),
             Arc::clone(&quality),
+            Arc::clone(&services),
             Arc::clone(&hotset),
             probes.clone(),
             Arc::clone(&upstream_slots),
@@ -181,6 +188,7 @@ impl App {
             cache,
             singleflight,
             quality,
+            services,
             hotset,
             datasets,
             network,
@@ -215,6 +223,7 @@ impl App {
         network: SharedNetworkState,
         cloudflare: SharedCloudflare,
         quality: Arc<QualityStore>,
+        services: crate::ranking::service::SharedServiceClassifier,
         hotset: SharedHotSet,
         probes: ProbeQueue,
         upstream_slots: Arc<Semaphore>,
@@ -237,6 +246,7 @@ impl App {
         let registry = Arc::new(
             UpstreamRegistry::build(
                 &config.upstream,
+                &config.proxy,
                 Arc::clone(&roots),
                 query_timeout,
                 config.server.udp.max_payload,
@@ -250,7 +260,7 @@ impl App {
             config.network.relearn_window,
         ));
         let acl = Arc::new(Acl::new(
-            config.server.allow_from.clone(),
+            config.effective_allow_from(),
             config.server.deny_from.clone(),
         ));
         let limiter = Arc::new(InboundLimiter::new(&config.server.rate_limit));
@@ -263,6 +273,7 @@ impl App {
             network,
             cloudflare,
             quality,
+            services,
             hotset,
             probes,
             Arc::clone(&roots),
@@ -305,6 +316,7 @@ impl App {
             Arc::clone(&self.network),
             Arc::clone(&self.cloudflare),
             Arc::clone(&self.quality),
+            Arc::clone(&self.services),
             Arc::clone(&self.hotset),
             self.probes.clone(),
             Arc::clone(&self.upstream_slots),
@@ -391,6 +403,7 @@ impl App {
             Arc::clone(&self.network),
             Arc::clone(&self.cloudflare),
             Arc::clone(&self.quality),
+            Arc::clone(&self.services),
             Arc::clone(&self.hotset),
             self.probes.clone(),
             Arc::clone(&self.upstream_slots),
@@ -623,6 +636,9 @@ mod tests {
     }
 
     const MINIMAL: &str = r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:0"]
 tcp_listen = ["127.0.0.1:0"]
@@ -693,14 +709,17 @@ enabled = false
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_config(&dir, MINIMAL);
         let app = App::build(&path).expect("build");
-        // A non-loopback listener with no ACL would create an open resolver.
+        // A semantic failure that is *not* restart-required, so the refusal under test is
+        // the semantic one rather than the listener check firing first. The open-resolver
+        // ACL rule is a load-time rule and is covered in tests/config.rs.
         std::fs::write(
             &path,
-            "[server]\nudp_listen = [\"0.0.0.0:0\"]\ntcp_listen = []\nallow_from = []\n",
+            "upstreams = [\"ftp://nope.example\"]\nproxies = []\n[server]\n\
+             udp_listen = [\"127.0.0.1:0\"]\ntcp_listen = [\"127.0.0.1:0\"]\n",
         )
         .expect("write");
         let err = app.reload().expect_err("must fail");
-        assert!(err.contains("allow_from"), "unexpected error: {err}");
+        assert!(err.contains("upstreams"), "unexpected error: {err}");
     }
 
     #[tokio::test]

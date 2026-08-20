@@ -89,6 +89,20 @@ pub struct Scheduler {
     relearn_window: Duration,
 }
 
+/// Score added to a route that leaves through a proxy.
+///
+/// Deliberately smaller than the failure term a route earns by not working, so it orders
+/// direct ahead of proxied while both are healthy and gets out of the way the moment the
+/// direct path degrades.
+const PROXY_PATH_PENALTY_MS: f64 = 120.0;
+
+fn proxy_penalty(route: &Route) -> f64 {
+    match route.egress {
+        crate::upstream::egress::EgressPath::Direct => 0.0,
+        crate::upstream::egress::EgressPath::Proxy(_) => PROXY_PATH_PENALTY_MS,
+    }
+}
+
 /// How much exploration is multiplied by during accelerated relearning.
 const RELEARN_EXPLORE_MULTIPLIER: f64 = 5.0;
 
@@ -119,6 +133,97 @@ impl Drop for HalfOpenSlot {
     fn drop(&mut self) {
         if let Some(route) = self.route.take() {
             route.with_health(|h| h.release_attempt());
+        }
+    }
+}
+
+/// Time left before the absolute foreground deadline.
+///
+/// Every nested operation derives its own timeout from this rather than inheriting a copy
+/// of the original budget, so a chain of operations cannot outlive the deadline by
+/// repeating it.
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// How long a cancelled-but-sent exchange keeps its accounting slot.
+///
+/// Long enough to cover a plausible round trip for a datagram that is genuinely still on
+/// the wire, short enough that a losing hedge cannot throttle admission of new work. Also
+/// clamped by the attempt's own terminal instant, so it never outlives the timeout that
+/// was already charged against the foreground deadline.
+const CANCELLED_EXCHANGE_GRACE: Duration = Duration::from_millis(100);
+
+/// Retains a physical-exchange permit until the exchange is terminal.
+///
+/// A datagram that has been sent stays on the wire whether or not the local future that
+/// sent it is still being awaited. Releasing the permit the moment a losing hedge is
+/// dropped would let the number of exchanges actually in flight exceed the configured
+/// ceiling — the ceiling would bound *waiters*, not *exchanges*, which is not what it
+/// claims to bound. So a cancelled-but-sent exchange keeps its slot until the point at
+/// which it could no longer produce a response.
+///
+/// Only a cancelled exchange pays for this: one that completes locally releases its slot
+/// inline, which is the overwhelmingly common case and stays free of any spawn.
+///
+/// The retention window is [`CANCELLED_EXCHANGE_GRACE`], not the attempt's whole
+/// remaining timeout. Holding the slot for the full timeout was measured to be
+/// catastrophic: on the load harness it took the truncation scenario from 15,285 queries
+/// per second at 100% success to 1,187 at **0%**, and the miss-heavy scenario from 100%
+/// to 85%. A losing hedge would hold a slot for up to `query_timeout` after its
+/// resolution had already answered the client, so completed past work throttled admission
+/// of new work until the pool was exhausted.
+///
+/// A short window is also the more honest model. Once the future is dropped the socket is
+/// closed and the kernel discards anything that arrives, so the only interval in which the
+/// exchange is meaningfully "on the wire" is about one round trip — not one timeout. The
+/// grace keeps the ceiling counting exchanges rather than waiters without letting it count
+/// exchanges that are over.
+struct ExchangeGuard {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// The instant after which this exchange can no longer produce a response.
+    terminal: Instant,
+    completed: bool,
+}
+
+impl ExchangeGuard {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit, terminal: Instant) -> Self {
+        Self {
+            permit: Some(permit),
+            terminal,
+            completed: false,
+        }
+    }
+
+    /// The exchange reached a terminal state locally, so the slot is free immediately.
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ExchangeGuard {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        if self.completed {
+            return;
+        }
+        let wait = self
+            .terminal
+            .saturating_duration_since(Instant::now())
+            .min(CANCELLED_EXCHANGE_GRACE);
+        if wait.is_zero() {
+            return;
+        }
+        // Held, not leaked: the sleep is bounded by the send timeout that was already
+        // charged against the foreground deadline. Outside a runtime there is nothing to
+        // wait on and nothing in flight, so the slot is simply returned.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(wait).await;
+                drop(permit);
+            });
         }
     }
 }
@@ -231,29 +336,106 @@ impl Scheduler {
     ) -> Vec<Arc<Route>> {
         let net = self.network.load();
         let now = Instant::now();
-        let mut scored: Vec<(f64, usize, Arc<Route>)> = Vec::with_capacity(group.routes.len());
-        let mut fallback: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        /// One candidate mid-ranking.
+        struct Candidate {
+            score: f64,
+            idx: usize,
+            route: Arc<Route>,
+            /// Whether `score` is real evidence or the absolute cold-start prior.
+            measured: bool,
+            /// Which bucket the route belongs to.
+            bucket: Bucket,
+        }
+        #[derive(PartialEq)]
+        enum Bucket {
+            /// Usable family, healthy circuit.
+            Ready,
+            /// Usable family, open circuit.
+            Degraded,
+            /// Family reads as unusable.
+            FamilyExcluded,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(group.routes.len());
         for (idx, route) in group.routes.iter().enumerate() {
             if route.stream_companion && !include_companions {
                 continue;
             }
-            // A family with no usable path is skipped entirely; an undetermined family is
-            // still tried, because absence of measurement is not evidence of failure.
+            // A family with no usable path is set aside; an undetermined family is still
+            // tried, because absence of measurement is not evidence of failure.
             let family_ok = match route.key.addr {
                 std::net::IpAddr::V4(_) => net.v4 != FamilyState::Unusable,
                 std::net::IpAddr::V6(_) => net.v6 != FamilyState::Unusable,
             };
-            if !family_ok {
-                continue;
-            }
-            let (usable, score) = route.with_health(|h| {
+            let (usable, score, measured) = route.with_health(|h| {
                 h.tick(now, &group.scheduler, seed ^ (idx as u64));
-                (h.is_usable(), h.score(route.weight))
+                (h.is_usable(), h.score(route.weight), h.is_measured())
             });
-            if usable {
-                scored.push((score, idx, Arc::clone(route)));
+            // A proxied route starts behind the direct one to the same server. Not
+            // because a proxy is worse, but because it is an extra hop the operator
+            // added for when the direct path stops working — so direct is preferred
+            // while it is healthy, and a direct route that starts failing accumulates a
+            // far larger penalty than this and loses on its own merits.
+            let score = score + proxy_penalty(route);
+            let bucket = if !family_ok {
+                Bucket::FamilyExcluded
+            } else if usable {
+                Bucket::Ready
             } else {
-                fallback.push((score, idx, Arc::clone(route)));
+                Bucket::Degraded
+            };
+            candidates.push(Candidate {
+                score,
+                idx,
+                route: Arc::clone(route),
+                measured,
+                bucket,
+            });
+        }
+
+        // Re-price the routes that have no measurements.
+        //
+        // `score` has to return *something* for a route nobody has used, and any absolute
+        // number is a claim about the network. Pick it too low and every unmeasured route
+        // outranks every proven one — permanently, because the moment a route is measured
+        // it acquires a real latency and drops back behind the untried ones. On a network
+        // whose real round trip exceeds the prior, that is a scheduler that never
+        // converges: it cycles through its whole route list forever, preferring whichever
+        // routes it knows least about, and a configuration listing several unreachable
+        // endpoints then fails to resolve anything at all. It is invisible on loopback,
+        // where the real round trip is far below any sane prior, and unmissable at 250ms.
+        //
+        // So the prior is taken from evidence instead: an unmeasured route is priced at
+        // the median of the routes that *have* been measured. "Unknown" then means
+        // "typical" — better than the worst proven route, worse than the best, and still
+        // reached by ordinary exploration. Absence of evidence stays neutral without
+        // becoming an advantage. With nothing measured at all, every route keeps its
+        // absolute prior and they tie, which is the right answer for a cold start.
+        let mut measured_scores: Vec<f64> = candidates
+            .iter()
+            .filter(|c| c.measured)
+            .map(|c| c.score)
+            .collect();
+        if !measured_scores.is_empty() {
+            measured_scores.sort_by(|a, b| a.total_cmp(b));
+            let median = measured_scores[measured_scores.len() / 2];
+            for c in candidates.iter_mut().filter(|c| !c.measured) {
+                // The weight bias is re-applied on top of the neutral prior so that an
+                // operator's preference still orders routes nobody has measured.
+                c.score =
+                    median + crate::upstream::health::RouteHealth::weight_bias(c.route.weight);
+            }
+        }
+
+        let mut scored: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        let mut fallback: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        let mut family_excluded: Vec<(f64, usize, Arc<Route>)> = Vec::new();
+        for c in candidates {
+            let entry = (c.score, c.idx, c.route);
+            match c.bucket {
+                Bucket::Ready => scored.push(entry),
+                Bucket::Degraded => fallback.push(entry),
+                Bucket::FamilyExcluded => family_excluded.push(entry),
             }
         }
 
@@ -267,6 +449,23 @@ impl Scheduler {
         if scored.is_empty() && !fallback.is_empty() {
             metrics::counter!(crate::metrics::names::UPSTREAM_LAST_RESORT_TOTAL).increment(1);
             scored = fallback;
+        }
+
+        // The same argument, one level up. Address-family usability is *derived from the
+        // host routing table*, so it reports on our ability to measure the network as
+        // much as on the network itself: a sandbox that hides `/proc/net`, an unfamiliar
+        // container, a platform whose route file moved, and every family reads
+        // `Unusable` on a host whose networking is perfectly healthy. Filtering those
+        // routes out then leaves nothing to rank and turns a detection failure into a
+        // total outage — every query SERVFAILs while the daemon still reports ready.
+        //
+        // So when no family reads as usable, the filter has told us nothing we can act
+        // on, and every route is offered rather than none. A genuine single-family
+        // outage is unaffected: the working family still populates `scored`, and the
+        // dead one is still skipped.
+        if scored.is_empty() && !family_excluded.is_empty() {
+            metrics::counter!(crate::metrics::names::UPSTREAM_FAMILY_FALLBACK_TOTAL).increment(1);
+            scored = family_excluded;
         }
         scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
 
@@ -290,6 +489,64 @@ impl Scheduler {
             ranked.swap(0, 1);
         }
         ranked
+    }
+
+    /// Ask a resolver authority other than `exclude`, for corroboration.
+    ///
+    /// Deliberately narrow: one attempt, one route, no hedge and no fallback. This exists
+    /// to obtain a *second opinion from a different resolver*, and a fan-out would either
+    /// ask the same authority again — which corroborates nothing — or spend the client's
+    /// remaining time on a question that is already answered.
+    ///
+    /// Returns `None` when no independent authority is configured or none answered in
+    /// time. That is not a failure: corroboration strengthens an answer, and its absence
+    /// leaves the answer exactly as strong as it already was.
+    pub async fn corroborate(
+        &self,
+        group: &UpstreamGroup,
+        message: Message,
+        options: DnsRequestOptions,
+        budget: Duration,
+        seed: u64,
+        exclude: &str,
+    ) -> Option<UpstreamAnswer> {
+        if budget.is_zero() {
+            return None;
+        }
+        let deadline = Instant::now() + budget;
+        let ranked = self.rank(group, seed);
+        let route = ranked
+            .into_iter()
+            .find(|r| r.key.authority.as_ref() != exclude)?;
+
+        let result = self
+            .attempt(
+                Arc::clone(&route),
+                message,
+                options,
+                deadline,
+                group.scheduler.query_timeout,
+                Duration::ZERO,
+                None,
+                // Shed rather than queue: a corroboration that has to wait for capacity
+                // is competing with the foreground work it exists to serve.
+                PermitPolicy::Shed,
+            )
+            .await;
+
+        let outcome = result.outcome?;
+        let now = Instant::now();
+        route.with_health(|h| h.record(outcome, result.latency, now, &group.scheduler));
+        if outcome != AttemptOutcome::Success {
+            return None;
+        }
+        Some(UpstreamAnswer {
+            message: result.message?,
+            route: route.key.clone(),
+            latency: result.latency.unwrap_or_default(),
+            stream_retry: false,
+            trust_ad: route.trust_ad,
+        })
     }
 
     /// Resolve one query through a group.
@@ -321,15 +578,27 @@ impl Scheduler {
         }
 
         let cfg = &group.scheduler;
-        let attempt_timeout = cfg.query_timeout.min(budget);
+        // One absolute deadline for the whole resolution. Every nested operation — permit
+        // wait, connect, send, hedge delay, truncation retry — measures itself against
+        // this instant instead of receiving a fresh copy of `budget`.
+        let deadline = start + budget;
         let mut last_detail = String::from("no attempt completed");
 
+        // Which ranked routes have actually been started. Positional accounting was wrong
+        // here: it assumed the top two routes had been attempted whether or not the hedge
+        // was ever admitted, so a disabled or budget-denied hedge silently consumed the
+        // second route's eligibility and the emergency fallback skipped straight past the
+        // one route that could still answer.
+        let mut attempted = vec![false; ranked.len()];
+
         let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
+        attempted[0] = true;
         pending.push(self.attempt(
             Arc::clone(&ranked[0]),
             message.clone(),
             options,
-            attempt_timeout,
+            deadline,
+            cfg.query_timeout,
             Duration::ZERO,
             None,
             PermitPolicy::Queue,
@@ -338,11 +607,26 @@ impl Scheduler {
         if cfg.hedge_enabled && ranked.len() > 1 && hedge_budget.allows(cfg.hedge_max_fraction) {
             let delay = ranked[0].with_health(|h| h.hedge_delay(cfg));
             if delay < budget {
+                // Prefer a hedge that reaches a *different resolver*. A second route to
+                // the same authority hedges against a lost packet or a bad path, which is
+                // worth something; a route to a different authority hedges against that
+                // resolver being down or wrong, which is worth more. The best-ranked
+                // independent route is chosen, falling back to plain second place when
+                // every alternative belongs to the same authority.
+                let primary_authority = &ranked[0].key.authority;
+                let hedge_idx = ranked
+                    .iter()
+                    .position(|r| &r.key.authority != primary_authority)
+                    .unwrap_or(1);
+
+                // Marked only here, where the attempt future is actually admitted.
+                attempted[hedge_idx] = true;
                 pending.push(self.attempt(
-                    Arc::clone(&ranked[1]),
+                    Arc::clone(&ranked[hedge_idx]),
                     message.clone(),
                     options,
-                    attempt_timeout,
+                    deadline,
+                    cfg.query_timeout,
                     delay,
                     Some(Arc::clone(&hedge_budget)),
                     PermitPolicy::Shed,
@@ -350,7 +634,6 @@ impl Scheduler {
             }
         }
 
-        let mut tried = 2.min(ranked.len());
         let mut fanned_out = false;
         // Whether any attempt actually reached an upstream. A resolution in which every
         // attempt was shed at the ceiling is overload, not upstream failure, and must be
@@ -358,13 +641,13 @@ impl Scheduler {
         let mut any_exchange = false;
 
         loop {
-            let remaining = budget.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
+            let left = remaining(deadline);
+            if left.is_zero() {
                 return Err(ResolveError::Timeout {
                     elapsed_ms: start.elapsed().as_millis() as u64,
                 });
             }
-            let next = match tokio::time::timeout(remaining, pending.next()).await {
+            let next = match tokio::time::timeout(left, pending.next()).await {
                 Err(_) => {
                     return Err(ResolveError::Timeout {
                         elapsed_ms: start.elapsed().as_millis() as u64,
@@ -382,6 +665,14 @@ impl Scheduler {
                     // the resolver generated itself.
                     let Some(outcome) = result.outcome else {
                         if Arc::ptr_eq(&result.route, &ranked[0]) {
+                            // A primary that never started is either overload or an
+                            // expired deadline, and the two are different failures: only
+                            // the first says anything about capacity.
+                            if remaining(deadline).is_zero() {
+                                return Err(ResolveError::Timeout {
+                                    elapsed_ms: start.elapsed().as_millis() as u64,
+                                });
+                            }
                             // The primary could not start inside its own timeout, so the
                             // resolver is overloaded. Report it exactly as the old
                             // resolve-entry shed did: SERVFAIL plus the shed counter.
@@ -420,9 +711,8 @@ impl Scheduler {
                             // Truncated UDP answers must be retried over a stream
                             // transport before they can be treated as complete.
                             if msg.metadata.truncation && !result.route.key.transport.is_stream() {
-                                let remaining = budget.saturating_sub(start.elapsed());
                                 return match self
-                                    .stream_retry(group, &message, options, remaining, seed)
+                                    .stream_retry(group, &message, options, deadline, seed)
                                     .await
                                 {
                                     Some(answer) => Ok(answer),
@@ -450,23 +740,33 @@ impl Scheduler {
                 }
                 None => {
                     // Every started attempt has finished without an acceptable answer.
-                    if cfg.emergency_fanout && !fanned_out && tried < ranked.len() {
+                    // Fall back over the routes that were never started, in rank order —
+                    // membership, not position, decides what is still eligible.
+                    if cfg.emergency_fanout && !fanned_out {
                         fanned_out = true;
-                        let extra = cfg.emergency_fanout_max.min(ranked.len() - tried);
-                        for route in ranked.iter().skip(tried).take(extra) {
+                        let mut extra = 0;
+                        for idx in 0..ranked.len() {
+                            if extra >= cfg.emergency_fanout_max {
+                                break;
+                            }
+                            if attempted[idx] {
+                                continue;
+                            }
+                            attempted[idx] = true;
                             pending.push(self.attempt(
-                                Arc::clone(route),
+                                Arc::clone(&ranked[idx]),
                                 message.clone(),
                                 options,
-                                attempt_timeout,
+                                deadline,
+                                cfg.query_timeout,
                                 Duration::ZERO,
                                 None,
                                 PermitPolicy::Shed,
                             ));
                             metrics::counter!(crate::metrics::names::UPSTREAM_DUPLICATES_TOTAL)
                                 .increment(1);
+                            extra += 1;
                         }
-                        tried += extra;
                         if extra > 0 {
                             continue;
                         }
@@ -494,10 +794,10 @@ impl Scheduler {
         group: &UpstreamGroup,
         message: &Message,
         options: DnsRequestOptions,
-        budget: Duration,
+        deadline: Instant,
         seed: u64,
     ) -> Option<UpstreamAnswer> {
-        if budget.is_zero() {
+        if remaining(deadline).is_zero() {
             return None;
         }
         metrics::counter!(crate::metrics::names::UPSTREAM_TCP_RETRY_TOTAL).increment(1);
@@ -509,14 +809,20 @@ impl Scheduler {
             .into_iter()
             .filter(|r| r.key.transport.is_stream())
             .collect();
-        let timeout = group.scheduler.query_timeout.min(budget);
+        // Each candidate is charged against the same absolute deadline. Handing every
+        // candidate its own copy of the remaining budget is what let two hanging stream
+        // routes take twice the whole foreground budget.
         for route in stream_routes.into_iter().take(2) {
+            if remaining(deadline).is_zero() {
+                break;
+            }
             let result = self
                 .attempt(
                     Arc::clone(&route),
                     message.clone(),
                     options,
-                    timeout,
+                    deadline,
+                    group.scheduler.query_timeout,
                     Duration::ZERO,
                     None,
                     PermitPolicy::Queue,
@@ -553,7 +859,8 @@ impl Scheduler {
         route: Arc<Route>,
         message: Message,
         options: DnsRequestOptions,
-        timeout: Duration,
+        deadline: Instant,
+        attempt_cap: Duration,
         delay: Duration,
         hedge_budget: Option<Arc<HedgeBudget>>,
         policy: PermitPolicy,
@@ -562,6 +869,11 @@ impl Scheduler {
         // exists to give the primary a head start, and holding a global slot through it
         // would subtract that capacity from real exchanges.
         if !delay.is_zero() {
+            // Sleeping past the deadline could only produce an answer nobody is waiting
+            // for, at the cost of a real exchange slot.
+            if delay >= remaining(deadline) {
+                return AttemptResult::shed(route);
+            }
             tokio::time::sleep(delay).await;
         }
 
@@ -574,9 +886,17 @@ impl Scheduler {
         // because it carries no evidence about the route. The permit is held across the
         // send await, so a dropped attempt future — a losing hedge, a budget expiry —
         // releases it: cancellation cannot leak a slot.
-        let _permit = match policy {
+        // Derived from the absolute deadline, never inherited: the permit wait and the
+        // exchange it protects share one budget rather than each receiving a full copy.
+        let wait_budget = attempt_cap.min(remaining(deadline));
+        if wait_budget.is_zero() {
+            return AttemptResult::shed(route);
+        }
+        let permit = match policy {
             PermitPolicy::Queue => {
-                match tokio::time::timeout(timeout, Arc::clone(&self.slots).acquire_owned()).await {
+                match tokio::time::timeout(wait_budget, Arc::clone(&self.slots).acquire_owned())
+                    .await
+                {
                     Ok(Ok(permit)) => permit,
                     _ => return AttemptResult::shed(route),
                 }
@@ -586,6 +906,12 @@ impl Scheduler {
                 Err(_) => return AttemptResult::shed(route),
             },
         };
+
+        // Recomputed after the wait, which may have consumed most of the budget.
+        let send_timeout = attempt_cap.min(remaining(deadline));
+        if send_timeout.is_zero() {
+            return AttemptResult::shed(route);
+        }
 
         if let Some(budget) = hedge_budget {
             budget.record_hedge();
@@ -616,17 +942,18 @@ impl Scheduler {
             }
         }
 
+        // From here the exchange may reach the wire, so its accounting slot is owned by a
+        // guard that survives cancellation of this future rather than by the future's own
+        // stack frame.
+        let mut exchange = ExchangeGuard::new(permit, Instant::now() + send_timeout);
+
         let sent = outgoing.clone();
-        match route
-            .send(
-                self.registry.provider(),
-                self.registry.context(),
-                outgoing,
-                options,
-                timeout,
-            )
-            .await
-        {
+        let sent_result = route
+            .send(self.registry.context(), outgoing, options, send_timeout)
+            .await;
+        // Terminal locally: response, transport error or timeout. The slot is free now.
+        exchange.complete();
+        match sent_result {
             Err((outcome, detail)) => AttemptResult {
                 route,
                 outcome: Some(outcome),
@@ -729,6 +1056,224 @@ fn validate_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        SchedulerConfig, TransportKind, UpstreamConfig, UpstreamGroupConfig, UpstreamServerConfig,
+        UpstreamTlsConfig,
+    };
+
+    fn test_group(count: usize) -> (Arc<UpstreamRegistry>, Arc<UpstreamGroup>) {
+        crate::tls::install_crypto_provider();
+        let servers: Vec<UpstreamServerConfig> = (0..count)
+            .map(|i| UpstreamServerConfig {
+                name: format!("s{i}"),
+                transport: TransportKind::Udp,
+                addresses: vec![format!("9.9.9.{}", i + 1).parse().expect("ip")],
+                ..UpstreamServerConfig::default()
+            })
+            .collect();
+        let cfg = UpstreamConfig {
+            default_group: "default".into(),
+            groups: vec![UpstreamGroupConfig {
+                name: "default".into(),
+                servers,
+                scheduler: SchedulerConfig {
+                    // Exploration is deliberately off: this asserts the ordering the
+                    // score produces, not the exploration that perturbs it.
+                    explore_rate: 0.0,
+                    ..SchedulerConfig::default()
+                },
+            }],
+            tls: UpstreamTlsConfig::default(),
+        };
+        let roots = Arc::new(crate::tls::root_store(false, &[]).expect("roots"));
+        let registry = Arc::new(
+            UpstreamRegistry::build(&cfg, &[], roots, Duration::from_secs(2), 1232)
+                .expect("registry"),
+        );
+        let group = registry.default_group().expect("group");
+        (registry, group)
+    }
+
+    fn scheduler(registry: Arc<UpstreamRegistry>) -> Scheduler {
+        Scheduler::new(
+            registry,
+            Arc::new(crate::network::NetworkState::new()),
+            Arc::new(Semaphore::new(64)),
+            Duration::ZERO,
+        )
+    }
+
+    /// A route that has been measured and works must not be displaced by routes nobody
+    /// has tried.
+    ///
+    /// This is the shape of a real failure: on a network whose round trip is 250ms, the
+    /// absolute cold-start prior scored *better* than any measured route, so the winner
+    /// of every query was whichever route had the least evidence. With several
+    /// unreachable endpoints configured, the scheduler cycled through them forever and
+    /// resolution never converged. Loopback hides it completely, because a sub-millisecond
+    /// round trip always beats the prior.
+    #[tokio::test]
+    async fn a_proven_route_outranks_routes_that_have_never_been_tried() {
+        let (registry, group) = test_group(6);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        // The first route works, at a latency typical of a real Internet path.
+        let proven = Arc::clone(&group.routes[0]);
+        for _ in 0..3 {
+            proven.with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(250)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_eq!(
+            ranked[0].key,
+            proven.key,
+            "a route measured working at 250ms must rank ahead of untried routes; \
+             ranked order was {:?}",
+            ranked.iter().map(|r| r.key.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The converse: a route measured as *bad* must fall behind untried routes, so that
+    /// alternatives still get their turn.
+    #[tokio::test]
+    async fn a_failing_route_falls_behind_routes_that_have_never_been_tried() {
+        let (registry, group) = test_group(6);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        let bad = Arc::clone(&group.routes[0]);
+        for _ in 0..4 {
+            bad.with_health(|h| h.record(AttemptOutcome::Timeout, None, Instant::now(), cfg));
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_ne!(
+            ranked[0].key, bad.key,
+            "a route that keeps timing out must not stay first"
+        );
+    }
+
+    /// With nothing measured at all, every route ties and configuration order decides.
+    /// That is the correct cold start: no route has earned a preference.
+    #[tokio::test]
+    async fn a_cold_group_ranks_in_configuration_order() {
+        let (registry, group) = test_group(4);
+        let sched = scheduler(registry);
+        let ranked = sched.rank(&group, 0);
+        let addrs: Vec<String> = ranked.iter().map(|r| r.key.addr.to_string()).collect();
+        assert_eq!(addrs, vec!["9.9.9.1", "9.9.9.2", "9.9.9.3", "9.9.9.4"]);
+    }
+
+    /// A faster proven route must outrank a slower proven route.
+    #[tokio::test]
+    async fn between_two_measured_routes_the_faster_one_wins() {
+        let (registry, group) = test_group(3);
+        let sched = scheduler(registry);
+        let cfg = &group.scheduler;
+
+        for _ in 0..3 {
+            group.routes[2].with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(20)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+            group.routes[0].with_health(|h| {
+                h.record(
+                    AttemptOutcome::Success,
+                    Some(Duration::from_millis(400)),
+                    Instant::now(),
+                    cfg,
+                )
+            });
+        }
+
+        let ranked = sched.rank(&group, 0);
+        assert_eq!(
+            ranked[0].key, group.routes[2].key,
+            "the 20ms route must beat the 400ms route"
+        );
+    }
+
+    /// Four routes to one provider are one authority, not four opinions.
+    #[tokio::test]
+    async fn transport_and_path_diversity_do_not_multiply_authorities() {
+        crate::tls::install_crypto_provider();
+        let cfg = UpstreamConfig {
+            default_group: "default".into(),
+            groups: vec![UpstreamGroupConfig {
+                name: "default".into(),
+                // One logical DoH resolver, reached over two HTTP versions and two
+                // addresses: four routes.
+                servers: vec![
+                    UpstreamServerConfig {
+                        name: "doh3".into(),
+                        transport: TransportKind::Doh3,
+                        addresses: vec![
+                            "9.9.9.9".parse().expect("ip"),
+                            "149.112.112.112".parse().expect("ip"),
+                        ],
+                        server_name: Some("dns.quad9.net".into()),
+                        ..UpstreamServerConfig::default()
+                    },
+                    UpstreamServerConfig {
+                        name: "doh2".into(),
+                        transport: TransportKind::Doh2,
+                        addresses: vec![
+                            "9.9.9.9".parse().expect("ip"),
+                            "149.112.112.112".parse().expect("ip"),
+                        ],
+                        server_name: Some("dns.quad9.net".into()),
+                        ..UpstreamServerConfig::default()
+                    },
+                ],
+                scheduler: SchedulerConfig::default(),
+            }],
+            tls: UpstreamTlsConfig::default(),
+        };
+        let roots = Arc::new(crate::tls::root_store(false, &[]).expect("roots"));
+        let registry = UpstreamRegistry::build(&cfg, &[], roots, Duration::from_secs(2), 1232)
+            .expect("registry");
+        let group = registry.default_group().expect("group");
+
+        assert_eq!(group.routes.len(), 4, "four distinct routes");
+        let authorities: std::collections::BTreeSet<&str> = group
+            .routes
+            .iter()
+            .map(|r| r.key.authority.as_ref())
+            .collect();
+        assert_eq!(
+            authorities.len(),
+            1,
+            "four routes to one resolver are one authority, saw {authorities:?}"
+        );
+        assert!(authorities.contains("dns.quad9.net"));
+    }
+
+    /// Two plaintext resolvers are two authorities, because nothing in the protocol lets
+    /// us prove otherwise — even when one operator runs both.
+    #[tokio::test]
+    async fn distinct_plaintext_resolvers_are_distinct_authorities() {
+        let (registry, group) = test_group(3);
+        let _ = registry;
+        let authorities: std::collections::BTreeSet<&str> = group
+            .routes
+            .iter()
+            .filter(|r| !r.stream_companion)
+            .map(|r| r.key.authority.as_ref())
+            .collect();
+        assert_eq!(authorities.len(), 3, "{authorities:?}");
+    }
 
     #[test]
     fn hedge_budget_enforces_the_fraction() {

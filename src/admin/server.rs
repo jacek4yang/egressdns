@@ -174,6 +174,7 @@ fn upstreams(app: &Arc<App>) -> serde_json::Value {
                     "server": route.key.server.to_string(),
                     "transport": route.key.transport.label(),
                     "address": route.key.addr.to_string(),
+                    "path": route.key.path.to_string(),
                     "circuit": h.circuit().label(),
                     "samples": h.samples(),
                     "consecutive_failures": h.consecutive_failures(),
@@ -421,6 +422,9 @@ mod tests {
     use std::path::PathBuf;
 
     const MINIMAL: &str = r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:0"]
 tcp_listen = ["127.0.0.1:0"]

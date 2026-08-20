@@ -109,7 +109,7 @@ discusses the older 1232 value (which comes from the IPv6 minimum MTU of 1280). 
 project ships **1232** as the default because it is the value that is safe on every path
 including IPv6 tunnels, and exposes `server.udp.max_payload` so an operator who has
 measured their path MTU can raise it toward 1400. The relevant trade-off is documented in
-`config/egressdns.example.toml` rather than buried in code.
+`config/egressdns.toml` rather than buried in code.
 
 **RFC 9520 puts a hard ceiling on retries.** "Resolvers MUST NOT retry a given query to a
 server address over a given DNS transport more than twice (i.e., three queries in total)."

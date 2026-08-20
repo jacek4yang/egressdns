@@ -4,6 +4,124 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-08-19
+
+**Breaking: the configuration format is replaced, not translated.** A file from
+before 2.0 is refused by name with a pointer to
+[the migration guide](docs/MIGRATION-V1-TO-V2.md). See that guide before upgrading.
+
+The theme is that the resolver should decide. Transport, HTTP version, address family,
+direct or proxied, which endpoint to prefer, when to hedge and when to corroborate are
+measurements, not preferences an operator should have to hold in their head.
+
+### The whole configuration
+
+```toml
+upstreams = [
+    "1.1.1.1",
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/dns-query",
+    "tls://dns.quad9.net",
+]
+
+proxies = []
+```
+
+Listeners default to loopback, so a minimal file cannot become an open resolver by
+accident. There is no configuration version field.
+
+### Added
+
+* **Endpoint URIs.** Bare addresses, provider aliases, `https://`, `tls://`, `quic://`,
+  `udp://`, `tcp://`. One `https://` entry becomes *both* an HTTP/3 and an HTTP/2 route
+  candidate for one logical resolver, because which is faster on a given network is a
+  measurement. `?addr=` pins bootstrap addresses for a name DNS cannot resolve yet.
+* **Egress proxies that work.** SOCKS5 (RFC 1928) with optional RFC 1929 authentication,
+  and HTTP CONNECT with optional Basic authentication, over cleartext or with TLS to the
+  proxy itself. Each proxy is a separate route with its own health; direct is preferred
+  while healthy and the proxy takes over on merit when it is not. UDP, DoQ and DoH3 are
+  never proxied, because no proxy implemented here carries datagrams.
+* **Runtime bootstrap.** An arbitrary named endpoint is resolved at startup from a
+  bare-IP upstream or the system resolver. Those supply an *address* only — the TLS
+  identity is always the configured name, so a hijacked bootstrap fails closed. Bootstrap
+  dependency cycles are refused before any I/O, with the full path.
+* **Resolver authority, distinct from route.** Cloudflare over HTTP/3, over HTTP/2, over
+  IPv6 and through a proxy are four routes and one authority. Hedges prefer an
+  independent authority.
+* **Negative corroboration.** An unsigned NXDOMAIN is checked against a different
+  authority before it is believed. It can only replace a negative with a positive, never
+  the reverse.
+* **`egressdnsctl doctor`**, with real protocol canaries — a real Do53 query, a real DoT
+  handshake validated against the configured name. Transports whose clients are not
+  implemented report `NOT_TESTED`, never `PASS`.
+* **`egressdnsctl query`**, a built-in client so health checks never depend on `dig`.
+
+### Fixed
+
+* **The daemon reported ready and answered nothing.** `ProcSubset=pid` hid
+  `/proc/net/route`, so the address-family detector found no default route and the
+  scheduler had nothing to rank. See
+  [the incident report](docs/incidents/2026-08-deployment-failure.md).
+* **A detection failure could black-hole all traffic.** Ranking now treats "no family is
+  usable" the way it treats "every circuit is open": offer every route rather than none.
+* **The ranker penalised routes it had measured.** An untried route scored ~365; one
+  measured working at a realistic 250 ms round trip scored ~551, and lower wins — so
+  measuring a route demoted it below every untried one and the scheduler cycled forever.
+  Invisible on loopback, where the test suite and load harness run.
+* **Untried routes were skipped by the emergency fallback** when the hedge was disabled or
+  budget-denied.
+* **Nested operations each received a fresh copy of the foreground budget.** The
+  truncation retry was measured at 4.005 s against a 2.5 s promise; DNSSEC validation,
+  including the wait for a validation permit, could spend several budgets. One absolute
+  deadline is now established at ingress and carried across everything the request awaits.
+* **A sent exchange released its accounting slot on cancellation**, so the ceiling bounded
+  waiters rather than exchanges.
+* **Runtime policy was published in two steps**, so a query could observe new
+  configuration with old policy.
+* **Every A and AAAA answer was probed on port 443 and ranked by the result.** An SSH host
+  or a mail exchanger was ordered by how well its addresses completed a TLS handshake on a
+  port they do not serve, and every address in every answer received an unsolicited
+  connection. Port-443 evidence now requires an HTTPS or SVCB record.
+* **The systemd unit could stop another resolver.** `Conflicts=` does not refuse to start
+  — it stops the other unit.
+* **The installer's canary was optional and lenient.** It needed `dig`, which a host may
+  not have, and `dig` exits 0 for SERVFAIL and REFUSED alike.
+* **Installer rollback restored the files and left DNS down.** The restored configuration
+  came back `root:root` and unreadable by the service account, and a unit that had just
+  failed repeatedly was rate-limited so the restart was silently declined. Both found by
+  exercising a genuinely failed cutover on a real host.
+* **The release workflow could not express a release candidate**, and the aarch64 CI job
+  was timing out rather than passing.
+
+### Performance
+
+Load harness, this release against the previous one, same host, identical harness:
+
+| scenario | 1.0.0 | 2.0.0 |
+| --- | --- | --- |
+| cache-hit | 45,726 qps, p99 14.09 ms | 46,445 qps, p99 14.03 ms |
+| mixed | 25,158 qps, p99 21.59 ms | 38,011 qps, p99 11.35 ms |
+| miss-heavy | 2,799 qps, p99 88.28 ms | 4,657 qps, p99 28.79 ms |
+| truncation | 2,908 qps, p99 88.19 ms | 4,410 qps, p99 31.19 ms |
+
+Parity where answers come from cache; 50–66% more throughput at roughly a third of the
+tail latency wherever an upstream is involved.
+
+Soak: 90 minutes, 177,250,187 queries, success 1.000, zero errors and zero timeouts. RSS
+rose from 12 MB to a 103 MB plateau and then declined to 97 MB; threads flat at 6; file
+descriptors ended where they started.
+
+Differential against Unbound 1.22.0 with DNSSEC validation, both forwarding to the same
+upstream: 15 cases, 15 agree, 0 differ.
+
+### Known limitations
+
+* No DDR, SVCB/HTTPS resolver discovery, RESINFO, ECH, ODoH or MASQUE.
+* SOCKS5 UDP ASSOCIATE is not implemented, so DoQ and DoH3 are direct-only.
+* Corroboration covers unsigned negative answers; there is no general multi-authority
+  answer-admissibility model.
+* No 24-hour soak. aarch64 is verified under emulation, not on native hardware.
+
 ## [Unreleased] — production-hardening pass, 2026-08-19
 
 A semantic audit of the 1.0.0 source. The theme is that configuration, documentation and

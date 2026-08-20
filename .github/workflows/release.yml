@@ -43,12 +43,25 @@ jobs:
           fi
           # The tag must match the version in Cargo.toml, or the release archive would
           # advertise a version the binary does not report.
+          #
+          # A pre-release suffix is allowed: SemVer calls v2.0.0-rc1 a pre-release of
+          # 2.0.0, and the release policy in docs/ requires candidates to be published
+          # that way. Requiring exact equality made that policy unimplementable — the
+          # first attempt to tag v2.0.0-rc1 was rejected here.
           CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-          if [ "$TAG" != "v${CARGO_VERSION}" ]; then
-            echo "tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}" >&2
-            exit 1
-          fi
+          case "$TAG" in
+            "v${CARGO_VERSION}")
+              PRERELEASE=0 ;;
+            "v${CARGO_VERSION}-"*)
+              PRERELEASE=1 ;;
+            *)
+              echo "tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}" >&2
+              echo "expected v${CARGO_VERSION} or v${CARGO_VERSION}-<prerelease>" >&2
+              exit 1 ;;
+          esac
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${CARGO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
 
       - name: Install the pinned toolchain and cross tooling
         run: |
@@ -76,9 +89,12 @@ jobs:
           set -Eeuo pipefail
           REPORTED="$(./target/x86_64-unknown-linux-gnu/release/egressdnsd --version)"
           echo "$REPORTED"
+          # Compared against the Cargo.toml version, not the tag: a pre-release tag
+          # carries a suffix the binary does not and should not report.
           case "$REPORTED" in
-            *"${{ steps.tag.outputs.tag }}"*|*"${GITHUB_REF_NAME#v}"*) ;;
-            *) echo "binary does not report the tagged version" >&2; exit 1 ;;
+            *"${{ steps.tag.outputs.version }}"*) ;;
+            *) echo "binary does not report version ${{ steps.tag.outputs.version }}" >&2
+               exit 1 ;;
           esac
 
       - name: Stage the release archives
@@ -95,7 +111,7 @@ jobs:
             cp "target/${target}/release/egressdnsd"  "$STAGE/"
             cp "target/${target}/release/egressdnsctl" "$STAGE/"
             cp packaging/systemd/egressdns.service "$STAGE/"
-            cp config/egressdns.production.toml "$STAGE/"
+            cp config/egressdns.toml "$STAGE/"
             cp LICENSE-MIT LICENSE-APACHE "$STAGE/"
             cp install.sh upgrade.sh uninstall.sh "$STAGE/"
             cp docs/INSTALL-RELEASE.md "$STAGE/INSTALL.md"
@@ -124,10 +140,16 @@ jobs:
             echo "release ${TAG} already exists; uploading assets only"
             gh release upload "$TAG" dist/* --clobber
           else
+            PRERELEASE_FLAG=""
+            if [ "${{ steps.tag.outputs.prerelease }}" = "1" ]; then
+              PRERELEASE_FLAG="--prerelease"
+            fi
+            # shellcheck disable=SC2086
             gh release create "$TAG" \
               --title "EgressDNS ${TAG}" \
               --generate-notes \
               --draft \
+              $PRERELEASE_FLAG \
               dist/*
             gh release edit "$TAG" --draft=false
           fi

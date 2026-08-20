@@ -6,6 +6,8 @@
 //! itself is an atomic pointer swap (see [`crate::runtime::App`]).
 
 mod defaults;
+pub mod endpoint;
+pub mod proxy;
 pub mod reload;
 mod validate;
 
@@ -29,6 +31,22 @@ use defaults as d;
 #[serde(deny_unknown_fields, default)]
 #[derive(Default)]
 pub struct Config {
+    /// Where to ask.
+    ///
+    /// Each entry is a bare address (`1.1.1.1`, `1.1.1.1:5353`,
+    /// `2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a provider alias
+    /// (`cloudflare`), or a URI (`https://dns.example.net/dns-query`,
+    /// `tls://dns.example.net`, `quic://dns.example.net`).
+    ///
+    /// How to ask is not configurable, because it is not a preference: transport,
+    /// HTTP version, address family, direct or proxy path, and which endpoint to
+    /// prefer are all decided from measurement.
+    pub upstreams: Vec<String>,
+    /// Egress proxies, tried when the direct path is unhealthy.
+    ///
+    /// `socks5://`, `socks5h://`, `http://` and `https://`. Which proxy is used, and
+    /// whether one is used at all, is decided from measured path health.
+    pub proxies: Vec<String>,
     /// Inbound DNS service settings.
     pub server: ServerConfig,
     /// Cache sizing and behaviour.
@@ -41,7 +59,21 @@ pub struct Config {
     pub serve_stale: ServeStaleConfig,
     /// Hot-name prefetching.
     pub prefetch: PrefetchConfig,
-    /// Upstream groups and transports.
+    /// TLS trust for encrypted upstreams and proxies.
+    ///
+    /// Operational rather than adaptive: which roots to trust is a deployment fact, not
+    /// something the resolver can measure its way to.
+    pub tls: UpstreamTlsConfig,
+    /// Parsed egress proxies, derived from [`Config::proxies`].
+    ///
+    /// Never deserialized, for the same reason as [`Config::upstream`].
+    #[serde(skip)]
+    pub proxy: Vec<proxy::ProxyEndpoint>,
+    /// Normalised upstream routes, derived from [`Config::upstreams`].
+    ///
+    /// Never deserialized: this is the internal shape the scheduler runs on, not a
+    /// configuration surface. Declaring it in a file is refused by name.
+    #[serde(skip)]
     pub upstream: UpstreamConfig,
     /// DNSSEC policy.
     pub dnssec: DnssecConfig,
@@ -81,12 +113,41 @@ impl Config {
 
     /// Parse and validate configuration from a TOML string.
     pub fn from_toml(text: &str, path: &str) -> Result<Self, ConfigError> {
-        let cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Toml {
+        // Legacy syntax is detected on the raw document, before serde sees it. Left to
+        // `deny_unknown_fields`, `[[upstream.groups]]` would produce "unknown field
+        // `upstream`", which tells an operator holding a v1 file nothing about what to
+        // do. There is no translation path: the old format is refused, by name, with a
+        // pointer to the migration guide.
+        let raw: toml::Value = toml::from_str(text).map_err(|source| ConfigError::Toml {
             path: path.to_string(),
             source,
         })?;
+        reject_legacy(&raw)?;
+
+        let mut cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Toml {
+            path: path.to_string(),
+            source,
+        })?;
+        cfg.upstream = endpoint::build_upstreams(&cfg.upstreams)
+            .map_err(|detail| ConfigError::invalid("upstreams", detail))?;
+        // The derived tree carries the trust settings so every existing consumer keeps
+        // reading them from one place.
+        cfg.upstream.tls = cfg.tls.clone();
+        cfg.proxy = proxy::parse_all(&cfg.proxies)
+            .map_err(|detail| ConfigError::invalid("proxies", detail))?;
         validate(&cfg)?;
         Ok(cfg)
+    }
+
+    /// The client networks the ACL should admit.
+    ///
+    /// Resolves the three states of [`ServerConfig::allow_from`]; see that field for why
+    /// omission and explicit emptiness cannot be the same value.
+    pub fn effective_allow_from(&self) -> Vec<IpNet> {
+        match &self.server.allow_from {
+            Some(nets) => nets.clone(),
+            None => loopback_networks(),
+        }
     }
 
     /// Render the effective configuration as TOML with secrets redacted.
@@ -96,6 +157,21 @@ impl Config {
             redacted.cloudflare.official.api_token_file = Some(PathBuf::from("<redacted>"));
         }
         redacted.cloudflare.official.api_token_env = None;
+        // `proxies` is echoed back verbatim, so a userinfo component would put the
+        // password in `--dump-config`, in the admin socket's effective-config response
+        // and in any support bundle built from either.
+        for entry in &mut redacted.proxies {
+            if let Ok(parsed) = proxy::parse(entry) {
+                if parsed.credentials.is_some() {
+                    *entry = format!(
+                        "{}://<redacted>@{}:{}",
+                        parsed.kind.label(),
+                        parsed.host,
+                        parsed.port
+                    );
+                }
+            }
+        }
         toml::to_string_pretty(&redacted)
             .unwrap_or_else(|e| format!("# failed to render configuration: {e}\n"))
     }
@@ -118,9 +194,20 @@ pub struct ServerConfig {
     pub udp_listen: Vec<SocketAddr>,
     /// TCP listen addresses.
     pub tcp_listen: Vec<SocketAddr>,
-    /// Client networks permitted to use the resolver. Default-deny: an empty list
-    /// refuses every client.
-    pub allow_from: Vec<IpNet>,
+    /// Client networks permitted to use the resolver.
+    ///
+    /// Three states, and they mean different things:
+    ///
+    /// * **Omitted.** With loopback-only listeners, `127.0.0.0/8` and `::1/128` are
+    ///   permitted automatically, so a file naming only `upstreams` is usable from the
+    ///   local host. With a non-loopback listener, omitting it is refused before
+    ///   binding rather than guessed at — that is the difference between a resolver
+    ///   for this machine and an open resolver.
+    /// * **Explicitly empty.** A deliberate deny-all. Respected as written.
+    /// * **Explicitly populated.** Exactly those networks, and nothing else.
+    ///
+    /// [`Config::effective_allow_from`] resolves the three into the list the ACL uses.
+    pub allow_from: Option<Vec<IpNet>>,
     /// Client networks explicitly refused, evaluated before `allow_from`.
     pub deny_from: Vec<IpNet>,
     /// Maximum time the foreground path may spend before returning something to the
@@ -146,7 +233,7 @@ impl Default for ServerConfig {
         Self {
             udp_listen: d::default_listen(),
             tcp_listen: d::default_listen(),
-            allow_from: Vec::new(),
+            allow_from: None,
             deny_from: Vec::new(),
             foreground_budget: Duration::from_millis(2_500),
             any_policy: AnyPolicy::Minimal,
@@ -649,6 +736,50 @@ impl TransportKind {
     }
 }
 
+/// The loopback networks admitted when no ACL is written.
+pub fn loopback_networks() -> Vec<IpNet> {
+    // Both are compile-time constants in disguise; `expect` is not available on a
+    // production path, so a parse failure degrades to an empty list, which is
+    // deny-all — the safe direction.
+    ["127.0.0.0/8", "::1/128"]
+        .iter()
+        .filter_map(|n| n.parse::<IpNet>().ok())
+        .collect()
+}
+
+/// Keys that belonged to the pre-2.0 configuration and are now refused.
+///
+/// Each carries the reason and the replacement, because "unknown field" is a useless
+/// thing to tell somebody holding a file that used to work.
+const LEGACY_KEYS: &[(&str, &str)] = &[
+    (
+        "version",
+        "EgressDNS 2.0 has no configuration version field. Delete the line; the format \
+         is identified by its contents",
+    ),
+    (
+        "upstream",
+        "the `[[upstream.groups]]` and `[[upstream.groups.servers]]` tables are removed. \
+         List your resolvers in `upstreams` instead, as addresses or URIs",
+    ),
+];
+
+/// Refuse a pre-2.0 document by name rather than by serde's unknown-field message.
+fn reject_legacy(raw: &toml::Value) -> Result<(), ConfigError> {
+    let Some(table) = raw.as_table() else {
+        return Ok(());
+    };
+    for (key, reason) in LEGACY_KEYS {
+        if table.contains_key(*key) {
+            return Err(ConfigError::invalid(
+                *key,
+                format!("{reason}. See docs/MIGRATION-V1-TO-V2.md"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A single upstream server definition.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -797,6 +928,14 @@ pub struct DnssecConfig {
     pub max_validation_depth: usize,
     /// Attach RFC 8914 Extended DNS Errors describing DNSSEC outcomes.
     pub extended_errors: bool,
+    /// Ask a second, independent resolver before believing an unsigned NXDOMAIN.
+    ///
+    /// A forged negative is how a name is made to disappear, and unlike a forged address
+    /// it leaves no evidence in the answer itself. Corroboration can only ever replace a
+    /// negative with a positive, never the reverse, so it cannot be used to erase a name.
+    ///
+    /// Costs one extra query, on cold unsigned NXDOMAINs only.
+    pub corroborate_negative: bool,
 }
 
 impl Default for DnssecConfig {
@@ -808,6 +947,7 @@ impl Default for DnssecConfig {
             max_concurrent_validations: 256,
             validation_cache_entries: 10_000,
             max_validation_depth: 12,
+            corroborate_negative: true,
             extended_errors: true,
         }
     }

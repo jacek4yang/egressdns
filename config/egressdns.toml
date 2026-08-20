@@ -1,0 +1,38 @@
+# EgressDNS — default configuration.
+#
+# This is a complete, working file. Listeners default to loopback, so it serves this
+# machine and nothing else; exposing it to a LAN is a deliberate act, not an accident.
+#
+# You describe *where to ask*. The daemon decides *how*: UDP or TCP, HTTP/2 or HTTP/3,
+# IPv4 or IPv6, direct or through a proxy, which endpoint to prefer, when to hedge and
+# when to give up on a path — all from what it measures on your network. Those are not
+# preferences, and asking you to hold them in your head would be asking you to guess.
+
+upstreams = [
+    "1.1.1.1",
+    "2606:4700:4700::1111",
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/dns-query",
+    "tls://dns.quad9.net",
+]
+
+# Egress proxies, tried when the direct path is unhealthy. Which one is used, and whether
+# one is used at all, is decided from measured path health.
+#
+#   proxies = ["socks5h://127.0.0.1:1080", "http://127.0.0.1:7890"]
+proxies = []
+
+# ---------------------------------------------------------------------------
+# Everything below is optional. The file above works on its own.
+# ---------------------------------------------------------------------------
+
+# An endpoint DNS cannot resolve yet — a private resolver, or one whose certificate does
+# not match its address — can pin where the socket is opened. The TLS identity is still
+# the hostname, so a wrong hint fails closed rather than reaching somebody else:
+#
+#   upstreams = ["tls://dns.internal.example:8853?addr=10.0.0.53"]
+
+# Private or corporate roots for encrypted upstreams:
+#
+#   [tls]
+#   extra_ca_files = ["/etc/ssl/private/corporate-root.pem"]

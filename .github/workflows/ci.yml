@@ -153,7 +153,12 @@ jobs:
   cross:
     name: Cross build (aarch64)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # This job exists to prove the aarch64 target compiles and links, not to produce a
+    # shippable binary — the Release workflow builds those. It used to do a full release
+    # build, which with thin LTO and codegen-units=1 took 38 minutes on a good run and
+    # timed out at 45 on a bad one. The dev profile proves the same thing in a fraction
+    # of the time; the timeout is kept generous for a cold dependency cache.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install the pinned toolchain
@@ -165,7 +170,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build
-        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+        run: cargo build --locked --target aarch64-unknown-linux-gnu
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc

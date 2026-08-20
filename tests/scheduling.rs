@@ -15,29 +15,8 @@ fn two_upstream_fragment(
 ) -> String {
     format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "slow"
-transport = "udp"
-addresses = ["{sip}"]
-port = {sport}
-weight = 100
-
-[[upstream.groups.servers]]
-name = "fast"
-transport = "udp"
-addresses = ["{fip}"]
-port = {fport}
-weight = 100
-
-[upstream.groups.scheduler]
-hedge_enabled = true
-hedge_min_delay = "50ms"
-hedge_max_delay = "200ms"
-hedge_max_fraction = 1.0
-query_timeout = "2s"
+upstreams = ["{slow}", "{fast}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -48,12 +27,21 @@ enabled = false
 [prefetch]
 enabled = false
 {extra}
-"#,
-        sip = slow.ip(),
-        sport = slow.port(),
-        fip = fast.ip(),
-        fport = fast.port()
+"#
     )
+}
+
+/// Pin hedging on with a delay window a test can observe.
+fn hedging(config: &mut egressdns::config::Config) {
+    for group in &mut config.upstream.groups {
+        let s = &mut group.scheduler;
+        s.hedge_enabled = true;
+        s.hedge_min_delay = Duration::from_millis(50);
+        s.hedge_max_delay = Duration::from_millis(200);
+        s.hedge_max_fraction = 1.0;
+        s.explore_rate = 0.0;
+        s.query_timeout = Duration::from_secs(2);
+    }
 }
 
 #[tokio::test]
@@ -87,11 +75,10 @@ async fn a_hedge_rescues_a_stalled_primary() {
         Transports::plain(),
     )
     .await;
-    let daemon = Daemon::start(&two_upstream_fragment(
-        slow.udp.expect("slow udp"),
-        fast.udp.expect("fast udp"),
-        "",
-    ))
+    let daemon = Daemon::start_tuned(
+        &two_upstream_fragment(slow.udp.expect("slow udp"), fast.udp.expect("fast udp"), ""),
+        hedging,
+    )
     .await;
 
     let started = std::time::Instant::now();
@@ -389,17 +376,8 @@ async fn admin_flush_forces_a_fresh_upstream_query() {
 async fn local_zones_and_hosts_answer_without_any_upstream() {
     // No upstream is reachable at all; local data must still resolve.
     let fragment = r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "unreachable"
-transport = "udp"
-addresses = ["10.255.255.1"]
-port = 53
-
-[upstream.groups.scheduler]
-query_timeout = "300ms"
+upstreams = ["10.255.255.1"]
+proxies = []
 
 [dnssec]
 mode = "off"

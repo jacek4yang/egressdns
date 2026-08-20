@@ -6,11 +6,10 @@
 //! randomised source port per query, which is what RFC 5452 wants.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_net::xfer::{DnsExchange, DnsHandle, FirstAnswer};
 use hickory_proto::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
 use hickory_resolver::config::{ConnectionConfig, ProtocolConfig, ResolverOpts};
@@ -21,10 +20,12 @@ use rustls::RootCertStore;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
+use crate::config::proxy::ProxyEndpoint;
 use crate::config::{
     EcsScope, SchedulerConfig, TransportKind, UpstreamConfig, UpstreamServerConfig,
 };
 use crate::error::ResolveError;
+use crate::upstream::egress::{EgressPath, EgressProvider};
 use crate::upstream::health::{AttemptOutcome, RouteHealth};
 
 /// Stable identity of a route.
@@ -36,16 +37,35 @@ pub struct RouteKey {
     pub transport: TransportKind,
     /// Remote address.
     pub addr: IpAddr,
+    /// How this route leaves the host: `direct`, or a proxy identity.
+    ///
+    /// Part of the identity because a direct route and a proxied route to the same
+    /// server are different paths with different failure modes, and each must carry its
+    /// own health. They are *not* different authorities: see [`RouteKey::authority`].
+    pub path: Arc<str>,
+    /// Which resolver is actually answering.
+    ///
+    /// Cloudflare over DoH/3, Cloudflare over DoH/2, Cloudflare over IPv6 and Cloudflare
+    /// through a proxy are four routes and **one** authority. Counting them as four
+    /// independent opinions would let one operator's outage, or one operator's forged
+    /// answer, look like a consensus.
+    ///
+    /// Derived conservatively: an encrypted endpoint is identified by the name its
+    /// certificate must carry, and a plaintext one by its address, because that is all we
+    /// can prove about it. When two things might be the same authority, they are treated
+    /// as the same one — under-counting independence is the safe direction.
+    pub authority: Arc<str>,
 }
 
 impl std::fmt::Display for RouteKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}/{}/{}",
+            "{}/{}/{}/{}",
             self.server,
             self.transport.label(),
-            self.addr
+            self.addr,
+            self.path
         )
     }
 }
@@ -93,6 +113,10 @@ pub struct Route {
     pub cookies_enabled: bool,
     /// Whether this server's AD bit may be trusted, subject to global policy.
     pub trust_ad: bool,
+    /// How this route leaves the host.
+    pub egress: EgressPath,
+    /// Connection factory for this route's egress path.
+    provider: EgressProvider,
     /// Whether this route exists only as the TCP companion of a configured UDP server.
     ///
     /// A companion is reachable for truncation retries and never for an ordinary query:
@@ -100,7 +124,7 @@ pub struct Route {
     /// traffic over TCP would be a different deployment from the one they described.
     pub stream_companion: bool,
     connection_config: ConnectionConfig,
-    connection: AsyncMutex<Option<DnsExchange<TokioRuntimeProvider>>>,
+    connection: AsyncMutex<Option<DnsExchange<EgressProvider>>>,
     health: SyncMutex<RouteHealth>,
     cookie: SyncMutex<CookieState>,
 }
@@ -134,11 +158,7 @@ impl Route {
     }
 
     /// Obtain a usable connection, creating one if necessary.
-    async fn connection(
-        &self,
-        provider: &TokioRuntimeProvider,
-        cx: &PoolContext,
-    ) -> Result<DnsExchange<TokioRuntimeProvider>, String> {
+    async fn connection(&self, cx: &PoolContext) -> Result<DnsExchange<EgressProvider>, String> {
         {
             let guard = self.connection.lock().await;
             if let Some(conn) = guard.as_ref() {
@@ -150,7 +170,8 @@ impl Route {
             return Ok(conn.clone());
         }
         let start = Instant::now();
-        let future = provider
+        let future = self
+            .provider
             .new_connection(self.key.addr, &self.connection_config, cx)
             .map_err(|e| crate::util::bounded(&e.to_string(), 160))?;
         let conn = future
@@ -167,13 +188,12 @@ impl Route {
     /// the pooled connection so the next attempt reconnects.
     pub async fn send(
         &self,
-        provider: &TokioRuntimeProvider,
         cx: &PoolContext,
         message: Message,
         options: DnsRequestOptions,
         timeout: Duration,
     ) -> Result<(DnsResponse, Duration), (AttemptOutcome, String)> {
-        let conn = match self.connection(provider, cx).await {
+        let conn = match self.connection(cx).await {
             Ok(c) => c,
             Err(e) => return Err((AttemptOutcome::TransportError, e)),
         };
@@ -224,7 +244,6 @@ impl UpstreamGroup {
 pub struct UpstreamRegistry {
     groups: HashMap<Arc<str>, Arc<UpstreamGroup>>,
     default_group: Arc<str>,
-    provider: TokioRuntimeProvider,
     context: Arc<PoolContext>,
 }
 
@@ -232,6 +251,7 @@ impl UpstreamRegistry {
     /// Build the registry from configuration.
     pub fn build(
         cfg: &UpstreamConfig,
+        proxies: &[ProxyEndpoint],
         roots: Arc<RootCertStore>,
         query_timeout: Duration,
         edns_payload_len: u16,
@@ -250,55 +270,45 @@ impl UpstreamRegistry {
         let mut tls = TlsConfig::new().map_err(|e| ResolveError::AllFailed {
             detail: crate::util::bounded(&e.to_string(), 120),
         })?;
-        tls.config = crate::tls::client_config(roots, &[], cfg.tls.session_resumption);
+        tls.config = crate::tls::client_config(Arc::clone(&roots), &[], cfg.tls.session_resumption);
         let context = Arc::new(PoolContext::new(opts, tls));
-        let provider = TokioRuntimeProvider::new();
+
+        // One provider per egress path, cloned into every route that uses it. Building
+        // them once means a route's identity, its connection pool and its health all
+        // refer to the same way out of this host.
+        let mut paths: Vec<(EgressPath, EgressProvider)> = vec![(
+            EgressPath::Direct,
+            EgressProvider::direct(Arc::clone(&roots)),
+        )];
+        for proxy in proxies {
+            let proxy = Arc::new(proxy.clone());
+            paths.push((
+                EgressPath::Proxy(Arc::clone(&proxy)),
+                EgressProvider::through(proxy, Arc::clone(&roots)),
+            ));
+        }
 
         let mut groups = HashMap::new();
         for group in &cfg.groups {
             let mut routes = Vec::new();
             for server in group.servers.iter().filter(|s| s.enabled) {
                 for addr in &server.addresses {
-                    let connection_config = connection_config_for(server, *addr)?;
-                    let key = RouteKey {
-                        server: Arc::from(server.name.as_str()),
-                        transport: server.transport,
-                        addr: *addr,
-                    };
-                    let cookie = CookieState::new(&key);
-                    routes.push(Arc::new(Route {
-                        key,
-                        weight: server.weight,
-                        ecs: server.ecs.clone(),
-                        cookies_enabled: server.cookies_effective(),
-                        trust_ad: server.trust_ad,
-                        stream_companion: false,
-                        connection_config,
-                        connection: AsyncMutex::new(None),
-                        health: SyncMutex::new(RouteHealth::new()),
-                        cookie: SyncMutex::new(cookie),
-                    }));
+                    for (path, provider) in &paths {
+                        // A proxy that cannot carry this transport is not a route. UDP,
+                        // DoQ and DoH3 need datagrams, and no proxy implemented here
+                        // carries them — offering the route anyway would produce a
+                        // timeout rather than an error.
+                        if !path_supports(path, server.transport) {
+                            continue;
+                        }
 
-                    // RFC 1035 §4.2.1 and RFC 7766 §5: a truncated UDP answer is retried
-                    // over TCP *to the same server*. Every UDP server therefore gets a
-                    // companion TCP route to the same address and port, created here
-                    // rather than demanded from the operator.
-                    //
-                    // Without it, an entirely reasonable UDP-only configuration turns
-                    // every large answer into SERVFAIL, because a truncated answer must
-                    // never be parsed opportunistically and there would be no stream
-                    // transport to retry over. The companion is marked so it is used for
-                    // truncation retries only and never chosen for an ordinary query;
-                    // making TCP a peer of UDP in ranking would change the transport mix
-                    // an operator asked for.
-                    if server.transport == TransportKind::Udp {
-                        let mut companion = ConnectionConfig::new(ProtocolConfig::Tcp);
-                        companion.port = server.effective_port();
-                        companion.bind_addr = server.bind_addr;
+                        let connection_config = connection_config_for(server, *addr)?;
                         let key = RouteKey {
                             server: Arc::from(server.name.as_str()),
-                            transport: TransportKind::Tcp,
+                            transport: server.transport,
                             addr: *addr,
+                            path: Arc::from(path.id().as_str()),
+                            authority: Arc::from(authority_of(server, *addr).as_str()),
                         };
                         let cookie = CookieState::new(&key);
                         routes.push(Arc::new(Route {
@@ -307,12 +317,63 @@ impl UpstreamRegistry {
                             ecs: server.ecs.clone(),
                             cookies_enabled: server.cookies_effective(),
                             trust_ad: server.trust_ad,
-                            connection_config: companion,
+                            stream_companion: false,
+                            egress: path.clone(),
+                            provider: provider.clone(),
+                            connection_config,
                             connection: AsyncMutex::new(None),
                             health: SyncMutex::new(RouteHealth::new()),
                             cookie: SyncMutex::new(cookie),
-                            stream_companion: true,
                         }));
+
+                        // RFC 1035 §4.2.1 and RFC 7766 §5: a truncated UDP answer is
+                        // retried over TCP *to the same server*. Every UDP server
+                        // therefore gets a companion TCP route to the same address and
+                        // port, created here rather than demanded from the operator.
+                        //
+                        // Without it, an entirely reasonable UDP-only configuration turns
+                        // every large answer into SERVFAIL, because a truncated answer
+                        // must never be parsed opportunistically and there would be no
+                        // stream transport to retry over. The companion is marked so it
+                        // is used for truncation retries only and never chosen for an
+                        // ordinary query.
+                        //
+                        // The companion is a *stream*, so unlike its UDP parent it can
+                        // also exist on a proxied path.
+                        if server.transport == TransportKind::Udp {
+                            for (cpath, cprovider) in &paths {
+                                let mut companion = ConnectionConfig::new(ProtocolConfig::Tcp);
+                                companion.port = server.effective_port();
+                                companion.bind_addr = server.bind_addr;
+                                let key = RouteKey {
+                                    server: Arc::from(server.name.as_str()),
+                                    transport: TransportKind::Tcp,
+                                    addr: *addr,
+                                    path: Arc::from(cpath.id().as_str()),
+                                    authority: Arc::from(authority_of(server, *addr).as_str()),
+                                };
+                                let cookie = CookieState::new(&key);
+                                routes.push(Arc::new(Route {
+                                    key,
+                                    weight: server.weight,
+                                    ecs: server.ecs.clone(),
+                                    cookies_enabled: server.cookies_effective(),
+                                    trust_ad: server.trust_ad,
+                                    egress: cpath.clone(),
+                                    provider: cprovider.clone(),
+                                    connection_config: companion,
+                                    connection: AsyncMutex::new(None),
+                                    health: SyncMutex::new(RouteHealth::new()),
+                                    cookie: SyncMutex::new(cookie),
+                                    stream_companion: true,
+                                }));
+                            }
+                        }
+                        // The UDP parent exists only on the direct path, so its companion
+                        // block runs once; break out rather than repeating it per proxy.
+                        if server.transport == TransportKind::Udp {
+                            break;
+                        }
                     }
                 }
             }
@@ -330,7 +391,6 @@ impl UpstreamRegistry {
         Ok(Self {
             groups,
             default_group: Arc::from(cfg.default_group.as_str()),
-            provider,
             context,
         })
     }
@@ -355,11 +415,6 @@ impl UpstreamRegistry {
         names
     }
 
-    /// The shared runtime provider.
-    pub fn provider(&self) -> &TokioRuntimeProvider {
-        &self.provider
-    }
-
     /// The shared pool context.
     pub fn context(&self) -> &PoolContext {
         &self.context
@@ -379,6 +434,41 @@ impl UpstreamRegistry {
         for route in self.all_routes() {
             route.reset_connection().await;
         }
+    }
+}
+
+/// The resolver authority a route reaches.
+///
+/// An encrypted endpoint is its authentication name: whatever address we opened a socket
+/// to, the certificate had to be for that name, so that is the identity we can actually
+/// prove. A plaintext endpoint has no proven identity beyond the address it answered
+/// from, so the address is used.
+///
+/// The consequence that matters: `https://dns.google/dns-query` and `tls://dns.google`
+/// are one authority reached two ways, and `1.1.1.1` and `1.0.0.1` are two authorities
+/// even though one operator runs both — because nothing in the protocol lets us prove
+/// they are related.
+fn authority_of(server: &UpstreamServerConfig, addr: IpAddr) -> String {
+    match server.server_name.as_deref() {
+        Some(name) => name.trim_end_matches('.').to_ascii_lowercase(),
+        // Address *and* port. Two resolvers can share an address and differ only by port
+        // — a co-located forwarder on 127.0.0.1:5353 beside one on 127.0.0.1:53 is two
+        // independent resolvers, and collapsing them would mean one could corroborate
+        // itself.
+        None => SocketAddr::new(addr, server.effective_port()).to_string(),
+    }
+}
+
+/// Whether `path` can carry `transport`.
+///
+/// The datagram transports need UDP, and no proxy implemented here carries datagrams.
+/// Offering such a route would produce a timeout instead of an error, which is the worst
+/// of both.
+fn path_supports(path: &EgressPath, transport: TransportKind) -> bool {
+    if transport.is_stream() {
+        true
+    } else {
+        path.carries_udp()
     }
 }
 
@@ -453,7 +543,7 @@ mod tests {
             }],
             tls: UpstreamTlsConfig::default(),
         };
-        UpstreamRegistry::build(&cfg, roots(), Duration::from_secs(2), 1232).expect("registry")
+        UpstreamRegistry::build(&cfg, &[], roots(), Duration::from_secs(2), 1232).expect("registry")
     }
 
     #[tokio::test]

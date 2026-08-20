@@ -224,22 +224,13 @@ async fn a_udp_only_upstream_still_retries_a_truncated_answer_over_tcp() {
     .await;
     let udp = servers.udp.expect("mock udp");
 
-    // Exactly one server, declared as UDP. There is deliberately no TCP entry.
+    // Exactly one upstream, a bare address, so Do53 only. The TCP companion the RFC
+    // 7766 retry needs is created by the registry rather than written by the operator,
+    // which is the point of the test.
     let fragment = format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "mock-udp"
-transport = "udp"
-addresses = ["{ip}"]
-port = {port}
-enable_cookies = false
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
+upstreams = ["{udp}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -249,9 +240,7 @@ enabled = false
 
 [prefetch]
 enabled = false
-"#,
-        ip = udp.ip(),
-        port = udp.port()
+"#
     );
     let daemon = Daemon::start(&fragment).await;
 
@@ -298,27 +287,8 @@ async fn truncated_udp_answers_are_retried_over_tcp() {
     // behaviour is replaced before the retry can happen.
     let fragment = format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "mock-udp"
-transport = "udp"
-addresses = ["{uip}"]
-port = {uport}
-enable_cookies = false
-
-[[upstream.groups.servers]]
-name = "mock-tcp"
-transport = "tcp"
-addresses = ["{tip}"]
-port = {tport}
-enable_cookies = false
-weight = 1
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
+upstreams = ["{udp}", "tcp://{tcp}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -328,11 +298,7 @@ enabled = false
 
 [prefetch]
 enabled = false
-"#,
-        uip = udp.ip(),
-        uport = udp.port(),
-        tip = tcp.ip(),
-        tport = tcp.port()
+"#
     );
     let daemon = Daemon::start(&fragment).await;
 
@@ -584,8 +550,9 @@ async fn clients_outside_the_acl_are_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("c.toml");
     let text = format!(
-        "[server]\nudp_listen=[\"127.0.0.1:0\"]\ntcp_listen=[]\nallow_from=[\"10.0.0.0/8\"]\n\
-         [metrics]\nenabled=false\n[admin]\nenabled=false\n[storage]\nenabled=false\n{}",
+        "{}\n[server]\nudp_listen=[\"127.0.0.1:0\"]\ntcp_listen=[]\n\
+         allow_from=[\"10.0.0.0/8\"]\n\
+         [metrics]\nenabled=false\n[admin]\nenabled=false\n[storage]\nenabled=false\n",
         udp_upstream_fragment(udp)
     );
     std::fs::write(&path, &text).expect("write");
@@ -734,19 +701,8 @@ async fn large_answers_set_tc_on_udp_and_fit_on_tcp() {
     // Use the TCP mock upstream so the large answer actually reaches the daemon.
     let fragment = format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "mock-tcp"
-transport = "tcp"
-addresses = ["{ip}"]
-port = {port}
-enable_cookies = false
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
+upstreams = ["tcp://{tcp}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -756,9 +712,7 @@ enabled = false
 
 [prefetch]
 enabled = false
-"#,
-        ip = tcp.ip(),
-        port = tcp.port()
+"#
     );
     let daemon = Daemon::start(&fragment).await;
 

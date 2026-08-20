@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "egressdns"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -536,6 +536,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "webpki-roots",
 ]
 

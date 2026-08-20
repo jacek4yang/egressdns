@@ -255,6 +255,14 @@ const MUTATIONS: &[Mutation] = &[
 /// fails the test suite with the path named. Array elements share the array's dotted
 /// path: `upstream.groups.name` covers every `[[upstream.groups]]` entry.
 pub const RELOADABLE: &[&str] = &[
+    // The v2 front-end is expanded into `upstream.groups` at parse time, and those are
+    // themselves reloadable, so changing the endpoint list applies on the next reload.
+    "proxies",
+    "upstreams",
+    "tls.extra_ca_files",
+    "tls.quic_zero_rtt",
+    "tls.session_resumption",
+    "tls.use_system_roots",
     "admin.max_request_bytes",
     "cache.failure_max_ttl",
     "cache.failure_min_ttl",
@@ -301,6 +309,7 @@ pub const RELOADABLE: &[&str] = &[
     "datasets.max_file_bytes",
     "datasets.max_records",
     "datasets.reload_interval",
+    "dnssec.corroborate_negative",
     "dnssec.extended_errors",
     "dnssec.max_validation_depth",
     "dnssec.mode",
@@ -411,37 +420,6 @@ pub const RELOADABLE: &[&str] = &[
     "ttl.cap_optimized_multi",
     "ttl.cap_serve_stale",
     "ttl.network_change_window",
-    "upstream.default_group",
-    "upstream.groups.name",
-    "upstream.groups.scheduler.circuit_failure_threshold",
-    "upstream.groups.scheduler.circuit_half_open_successes",
-    "upstream.groups.scheduler.circuit_open_duration",
-    "upstream.groups.scheduler.emergency_fanout",
-    "upstream.groups.scheduler.emergency_fanout_max",
-    "upstream.groups.scheduler.explore_rate",
-    "upstream.groups.scheduler.hedge_enabled",
-    "upstream.groups.scheduler.hedge_max_delay",
-    "upstream.groups.scheduler.hedge_max_fraction",
-    "upstream.groups.scheduler.hedge_min_delay",
-    "upstream.groups.scheduler.hedge_percentile",
-    "upstream.groups.scheduler.query_timeout",
-    "upstream.groups.servers.addresses",
-    "upstream.groups.servers.bind_addr",
-    "upstream.groups.servers.ecs.ipv4",
-    "upstream.groups.servers.ecs.ipv6",
-    "upstream.groups.servers.enable_cookies",
-    "upstream.groups.servers.enabled",
-    "upstream.groups.servers.name",
-    "upstream.groups.servers.path",
-    "upstream.groups.servers.port",
-    "upstream.groups.servers.server_name",
-    "upstream.groups.servers.transport",
-    "upstream.groups.servers.trust_ad",
-    "upstream.groups.servers.weight",
-    "upstream.tls.extra_ca_files",
-    "upstream.tls.quic_zero_rtt",
-    "upstream.tls.session_resumption",
-    "upstream.tls.use_system_roots",
 ];
 
 /// Render a refusal message an operator can act on.
@@ -474,7 +452,7 @@ mod tests {
         new.cloudflare.mode = crate::config::CloudflareMode::Off;
         new.probe.enabled = !old.probe.enabled;
         new.prefetch.enabled = !old.prefetch.enabled;
-        new.server.allow_from = vec!["10.0.0.0/8".parse().expect("net")];
+        new.server.allow_from = Some(vec!["10.0.0.0/8".parse().expect("net")]);
         new.ttl.cap_default = old.ttl.cap_default / 2;
         new.dnssec.mode = crate::config::DnssecMode::Off;
         new.server.rate_limit.per_client_qps = 12_345;
@@ -646,7 +624,11 @@ mod tests {
         let mut paths = std::collections::BTreeSet::new();
         let mut section: Option<String> = None;
         for line in text[start..end].lines() {
-            if let Some(rest) = line.strip_prefix("### `") {
+            // Keys that live at the root of the document have no table to sit under, so
+            // an explicit heading introduces them and their rows carry no prefix.
+            if line.starts_with("### Top-level keys") {
+                section = Some(String::new());
+            } else if let Some(rest) = line.strip_prefix("### `") {
                 // `[server.udp]` and `[[upstream.groups]]` both denote the dotted path.
                 let path = rest
                     .trim_start_matches('[')
@@ -657,8 +639,23 @@ mod tests {
                 paths.insert(path.to_string());
             } else if let Some(rest) = line.strip_prefix("| `") {
                 let key = rest.split('`').next().expect("row key");
+                // Only a back-ticked identifier in the first column is a key row. Tables
+                // in the prose use the same shape for illustrative values, and treating
+                // `https://host/path` as a configuration field would be nonsense. This
+                // matches the rule in scripts/check-config-docs.py.
+                if key.is_empty()
+                    || !key
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    continue;
+                }
                 let section = section.as_ref().expect("row before any section heading");
-                paths.insert(format!("{section}.{key}"));
+                if section.is_empty() {
+                    paths.insert(key.to_string());
+                } else {
+                    paths.insert(format!("{section}.{key}"));
+                }
             }
         }
         // A leaf is a path no other path extends; everything else is a table.

@@ -200,6 +200,23 @@ impl CloudflareState {
         mode_from_u8(self.mode_override.load(Ordering::Relaxed))
     }
 
+    /// Effective mode for a configured mode taken from the live configuration generation.
+    ///
+    /// The request path reads its configured mode from the `Config` published by the
+    /// runtime-state swap, not from this struct's own atomic, so that one query observes
+    /// one coherent policy generation. Only the runtime *override* is read from here,
+    /// because it is a live operational control rather than configuration.
+    ///
+    /// An override may only ever weaken the configured mode. A reload that weakens the
+    /// configuration below a standing override therefore ignores that override from the
+    /// first query onwards, without depending on `reconfigure` having run yet.
+    pub fn effective_mode(&self, configured: CloudflareMode) -> CloudflareMode {
+        match self.mode_override() {
+            Some(over) if mode_rank(over) <= mode_rank(configured) => over,
+            _ => configured,
+        }
+    }
+
     /// Apply a runtime override.
     ///
     /// Returns an error when the requested mode is stronger than the configured mode. The
@@ -626,6 +643,31 @@ mod tests {
         state.reconfigure(&reload_cfg(true, CloudflareMode::Off));
         assert!(state.mode_override().is_none());
         assert_eq!(state.mode(), CloudflareMode::Off);
+    }
+
+    /// The request path reads its configured mode from the runtime-state generation, so
+    /// it must be safe against a `reconfigure` that has not run yet. A standing override
+    /// stronger than the incoming configured mode must be ignored on sight, not applied
+    /// until some later call clears it.
+    #[test]
+    fn effective_mode_ignores_an_override_stronger_than_the_live_configuration() {
+        let state = CloudflareState::new(&reload_cfg(true, CloudflareMode::VerifiedAugment));
+        state
+            .set_mode_override(CloudflareMode::Preserve)
+            .expect("weakening is allowed");
+
+        // The new generation configures `Off`. `reconfigure` has deliberately not been
+        // called, modelling the window a query can land in during a reload.
+        assert_eq!(
+            state.effective_mode(CloudflareMode::Off),
+            CloudflareMode::Off,
+            "a stale override must never strengthen the live configured mode"
+        );
+        // The override is still in force for a generation it legitimately weakens.
+        assert_eq!(
+            state.effective_mode(CloudflareMode::VerifiedAugment),
+            CloudflareMode::Preserve
+        );
     }
 
     #[test]

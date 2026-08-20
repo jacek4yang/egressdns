@@ -30,13 +30,12 @@ Print the effective configuration, with every default made explicit:
 egressdnsd --config /etc/egressdns/config.toml --dump-config
 ```
 
-Three annotated files ship with the source:
+Two annotated files ship with the source:
 
 | File | Use |
 | --- | --- |
-| `config/egressdns.minimal.toml` | The smallest file that starts and serves. |
-| `config/egressdns.example.toml` | Every key, with commentary. Start here. |
-| `config/egressdns.production.toml` | A hardened LAN deployment. **Edit `server.allow_from` before use.** |
+| `config/egressdns.toml` | The default. A complete working file; start here. |
+| `config/egressdns.lan.example.toml` | Serving a LAN. **Edit `server.allow_from` before use.** |
 
 ## Durations
 
@@ -153,6 +152,72 @@ experiment that varied only the budget.
 
 Generated from the field documentation in `src/config/mod.rs`; the source is authoritative
 if the two ever disagree.
+
+### Top-level keys
+
+These sit at the root of the file, before any table. Together they are a complete,
+working configuration.
+
+```toml
+upstreams = [
+    "1.1.1.1",
+    "2606:4700:4700::1111",
+    "https://cloudflare-dns.com/dns-query",
+    "tls://dns.quad9.net",
+]
+
+proxies = []
+```
+
+There is no configuration version field. The format is identified by its contents, and a
+file from before 2.0 is refused by name with a pointer to
+[the migration guide](MIGRATION-V1-TO-V2.md) rather than half-applied.
+
+Each `upstreams` entry may be a bare address (`1.1.1.1`, `1.1.1.1:5353`,
+`2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a provider alias (`cloudflare`,
+`google`, `quad9`, `adguard`), or a URI:
+
+| Form | Becomes | Default port |
+| --- | --- | --- |
+| bare address | Do53 over UDP, with the TCP companion RFC 7766 truncation retries need | 53 |
+| `https://host/path` | **both** an HTTP/3 and an HTTP/2 candidate for one logical DoH resolver | 443 |
+| `tls://host` | DoT | 853 |
+| `quic://host` | DoQ | 853 |
+| `udp://host`, `tcp://host` | Do53 over that transport specifically | 53 |
+
+An `https://` entry deliberately produces two route candidates rather than one. Whether
+HTTP/3 or HTTP/2 is better on a given network is a measurement, not a configuration
+choice: the scheduler ranks both from observed latency and failure history, prefers the
+better one, and falls back to the other when a path degrades — without an operator having
+to predict which will work. The same applies to UDP against TCP, IPv4 against IPv6, and
+direct against proxied.
+
+`http://` is refused: it has the privacy cost of DoH and none of its integrity. An
+encrypted transport pointed at a literal address is also refused, because there would be
+no name to authenticate the certificate against.
+
+**Naming an endpoint DNS cannot resolve yet.** A named endpoint needs an address before it
+can be reached. Well-known providers carry published bootstrap addresses; any other name
+is resolved at startup by the bootstrap resolver. When neither is possible — a resolver on
+a private network, one whose certificate does not match its address, one being stood up
+before its own record exists — pin the address with `?addr=`:
+
+```toml
+upstreams = ["tls://dns.internal.example:8853?addr=10.0.0.53"]
+```
+
+`addr` may be repeated. It changes only which socket is opened: the TLS identity is still
+the hostname, so a stale or wrong hint fails closed rather than quietly reaching somebody
+else. It is the same information SVCB carries as `ipv4hint`.
+
+`proxies` entries are `socks5://`, `socks5h://`, `http://` or `https://`, with optional
+`user:password@` credentials. Whether a proxy is used, and which one, is decided from
+measured path health rather than configured.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `upstreams` | list of endpoint URI | `[]` (empty) | Where to ask. At least one is required. |
+| `proxies` | list of proxy URI | `[]` (empty) | Egress proxies, tried when the direct path is unhealthy. |
 
 ### `[server]`
 
@@ -288,83 +353,18 @@ Hot-name prefetching.
 | `transition_prediction` | boolean | `false` | Enable the bounded aggregate transition table (query-sequence prediction). Disabled by default; see `docs/BENCHMARKS.md` for the evidence requirement. |
 | `transition_table_size` | integer | `20000` | Bound on the transition table. |
 
-### `[upstream]`
+### `[tls]`
 
-Upstream groups and shared transport settings.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `default_group` | string | `"default".to_string()` | Group used when no suffix rule matches. |
-| `groups` | array of `[[upstream.groups]]` | `vec![UpstreamGroupConfig::default()]` | Configured upstream groups. |
-| `tls` | sub-table `[upstream.tls]` | see below | TLS trust configuration shared by encrypted transports. |
-
-### `[upstream.tls]`
-
-TLS material shared by every encrypted upstream transport.
+TLS trust for encrypted upstreams. Which roots to trust is a deployment fact rather than
+something the resolver can measure its way to, so it stays configurable; how to *use* an
+encrypted upstream does not.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `use_system_roots` | boolean | `true` | Use the platform trust store in addition to the compiled-in Mozilla root set. |
-| `extra_ca_files` | list of path | `[]` (empty) | Additional PEM bundles containing corporate roots. |
-| `session_resumption` | boolean | `true` | Enable TLS session resumption for DoT/DoH/DoQ. |
-| `quic_zero_rtt` | boolean | `false` | QUIC 0-RTT is disabled: early data is replayable and DNS queries are not idempotent from a privacy standpoint. See `docs/THREAT_MODEL.md`. |
-
-### `[[upstream.groups]]`
-
-One named group of upstream servers. At least one group must exist and one must match `upstream.default_group`.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `name` | string | `"default".to_string()` | Group name referenced by suffix rules and by `upstream.default_group`. |
-| `servers` | array of `[[upstream.groups.servers]]` | two public resolvers over DoT (see `[[upstream.groups]]` below) | Members of the group. |
-| `scheduler` | sub-table `[upstream.groups.scheduler]` | see below | Scheduling policy for this group. |
-
-### `[[upstream.groups.servers]]`
-
-One upstream server inside a group.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `name` | string | `String::new()` | Operator-facing name; also used as the bounded metrics label. |
-| `transport` | string: `"udp"` \| `"tcp"` \| `"dot"` \| `"doh2"` \| `"doh3"` \| `"doq"` | `udp` | Transport used to reach the server. |
-| `addresses` | list of IP address | `[]` (empty) | Literal addresses of the server. Encrypted transports require these as bootstrap addresses so that the resolver never needs to resolve its own upstream. |
-| `port` | integer (optional) | unset | Port override; defaults to the IANA port for the transport. |
-| `server_name` | string (optional) | unset | TLS server name (SNI and certificate hostname) for encrypted transports. |
-| `path` | string (optional) | unset | HTTP path for DoH transports. |
-| `bind_addr` | address:port (optional) | unset | Optional local source address to bind. |
-| `weight` | integer | `100` | Static preference weight used to break ties between equally healthy routes. |
-| `enabled` | boolean | `true` | Disable without deleting. |
-| `enable_cookies` | boolean (optional) | unset | Send RFC 7873 DNS Cookies. `None` means "automatic": enabled for UDP and TCP, disabled for encrypted transports where they add nothing. Setting `true` explicitly on an encrypted transport is a configuration error. |
-| `trust_ad` | boolean | `false` | Trust this upstream's AD bit when local validation is disabled. Requires an authenticated transport. |
-| `ecs` | sub-table `[upstream.groups.servers.ecs]` (optional) | unset | Per-server ECS override; `None` inherits the global policy. |
-
-### `[upstream.groups.servers.ecs]`
-
-A per-server ECS prefix override, with the same shape and rules as `[ecs.egress]`; it applies to this upstream server only.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `ipv4` | IPv4 CIDR (optional) | — | IPv4 prefix advertised to this server. Must be a public prefix. |
-| `ipv6` | IPv6 CIDR (optional) | — | IPv6 prefix advertised to this server. Must be a public prefix. |
-
-### `[upstream.groups.scheduler]`
-
-Hedging, circuit breaking and failure-cache behaviour.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `hedge_enabled` | boolean | `true` | Enable a single bounded hedge request. |
-| `hedge_percentile` | float | `0.95` | Latency percentile of the primary route used to time the hedge. |
-| `hedge_min_delay` | duration | `20ms` | Lower bound on the hedge delay. |
-| `hedge_max_delay` | duration | `400ms` | Upper bound on the hedge delay. |
-| `hedge_max_fraction` | float | `0.15` | Maximum fraction of queries that may be hedged, as a privacy and load control. |
-| `query_timeout` | duration | `1500ms` | Per-attempt upstream timeout. |
-| `explore_rate` | float | `0.02` | Fraction of queries deliberately routed to a non-optimal healthy route so that recovered upstreams can regain rank. |
-| `circuit_failure_threshold` | integer | `5` | Consecutive failures before the circuit opens. |
-| `circuit_open_duration` | duration | `20s` | How long the circuit stays open before a half-open probe is allowed. |
-| `circuit_half_open_successes` | integer | `2` | Successful half-open probes required to close the circuit. |
-| `emergency_fanout` | boolean | `true` | Permit a bounded emergency fan-out when every route is unhealthy. |
-| `emergency_fanout_max` | integer | `3` | Maximum number of routes contacted during an emergency fan-out. |
+| `extra_ca_files` | list of path | `[]` (empty) | Additional PEM bundles containing corporate or private roots. |
+| `session_resumption` | boolean | `true` | Enable TLS session resumption for DoT, DoH and DoQ. |
+| `quic_zero_rtt` | boolean | `false` | QUIC 0-RTT. Early data is replayable and DNS queries are not idempotent from a privacy standpoint, so this is refused if enabled; see `docs/THREAT_MODEL.md`. |
 
 ### `[dnssec]`
 
@@ -378,6 +378,7 @@ DNSSEC validation policy.
 | `max_concurrent_validations` | integer | `256` | Global ceiling on DNSSEC validations running at once, enforced by a semaphore the resolver acquires before validating. A query that cannot get a permit inside the foreground budget is shed as SERVFAIL and counted in `dnssec_shed_total` rather than queueing without bound. **Restart-required**: the semaphore is created once at startup and shared by every resolver generation. |
 | `max_validation_depth` | integer | `12` | Maximum delegation depth followed while building a validation chain, which bounds the work one hostile zone can force. Applied as the request depth limit on every validating lookup. |
 | `validation_cache_entries` | integer | `10000` | Bound on the validation result cache. |
+| `corroborate_negative` | boolean | `true` | Ask a second, independent resolver authority before believing an unsigned NXDOMAIN. A forged negative is how a name is made to disappear and, unlike a forged address, leaves no evidence in the answer itself. Corroboration can only ever replace a negative with a positive, never the reverse, so it cannot be used to erase a name. Costs one extra query on cold unsigned NXDOMAINs only. |
 | `extended_errors` | boolean | `true` | Attach RFC 8914 Extended DNS Errors describing DNSSEC outcomes. |
 
 ### `[ecs]`
@@ -685,7 +686,7 @@ resolver that is quietly wrong.
 | At least one UDP or TCP listener must be configured, with no duplicate addresses. | A resolver with no listener is a process that burns memory; a duplicated listen address fails at bind time with a much less obvious message. |
 | A listener on any address other than loopback requires a non-empty `server.allow_from`. | Default-deny. An open resolver on a LAN is an amplification reflector. |
 | `server.allow_from` entries may not be multicast ranges. | A multicast prefix cannot identify a client, so such a rule can only ever be a mistake. |
-| `server.udp.max_payload` must be between 512 and 4096. | RFC 1035 fixes the floor; RFC 9715 explains why anything above the path MTU causes fragmentation. The shipped default is 1232, and `config/egressdns.example.toml` documents 1400 as the only sane larger value. |
+| `server.udp.max_payload` must be between 512 and 4096. | RFC 1035 fixes the floor; RFC 9715 explains why anything above the path MTU causes fragmentation. The shipped default is 1232, and `config/egressdns.toml` notes 1400 as the only sane larger value. |
 | `server.udp.non_edns_max_payload` must be exactly 512. | RFC 1035. The key exists so the value is visible, not so it can be changed. |
 | `server.udp.workers_per_socket > 1` requires `reuse_port = true`. | Multiple workers on one socket without `SO_REUSEPORT` is just contention. |
 | `serve_stale.client_timeout` must be below `server.foreground_budget`, and at most 1800ms. | Otherwise serve-stale can never fire and the client just times out. RFC 8767 §5 recommends ≤1.8s. |

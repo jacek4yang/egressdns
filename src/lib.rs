@@ -23,6 +23,7 @@ pub mod cloudflare;
 pub mod config;
 pub mod datasets;
 pub mod dns;
+pub mod doctor;
 pub mod error;
 pub mod metrics;
 pub mod network;

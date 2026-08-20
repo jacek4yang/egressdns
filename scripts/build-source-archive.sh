@@ -4,12 +4,16 @@
 #
 #   ./scripts/build-source-archive.sh [output-directory]
 #
-# Produces egressdns-v1.0.0-source.tar.gz containing exactly one top-level directory,
+# Produces egressdns-v<version>-source.tar.gz containing exactly one top-level directory,
 # `egressdns/`, with no build artefacts, VCS metadata, caches or credentials.
 
 set -Eeuo pipefail
 
-readonly VERSION="v1.0.0"
+# Derived from Cargo.toml rather than hard-coded: an archive named for a version the
+# tree is not is worse than no archive at all.
+VERSION="v$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' \
+    "$(cd "$(dirname "$0")/.." && pwd)/Cargo.toml")"
+readonly VERSION
 readonly NAME="egressdns"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

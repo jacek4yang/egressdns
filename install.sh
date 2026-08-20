@@ -213,13 +213,43 @@ rollback() {
     done
     if [ -f "$BACKUP_DIR/config.toml" ]; then
         install -m 0640 "$BACKUP_DIR/config.toml" "$(path "$CONF_DIR")/config.toml"
+        # `install` run as root leaves the file root:root. The service runs as
+        # $SERVICE_USER and reads the config through its *group*, so without this the
+        # restored configuration is unreadable to the daemon and the rollback leaves DNS
+        # down while reporting success. Found by exercising a failed cutover.
+        if [ -z "$ROOT_PREFIX" ] && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+            chown "root:$SERVICE_USER" "$(path "$CONF_DIR")/config.toml" || true
+        fi
     fi
     if [ -f "$BACKUP_DIR/egressdns.service" ]; then
         install -m 0644 "$BACKUP_DIR/egressdns.service" "$(path "$UNIT_PATH")"
     fi
     if [ -z "$ROOT_PREFIX" ]; then
         systemctl daemon-reload || true
-        systemctl restart egressdns.service 2>/dev/null || true
+        # A unit that has just failed repeatedly is rate-limited: systemd refuses to
+        # start it again until the failure is cleared. Without this the restart is
+        # silently declined and the rollback ends with the service dead.
+        systemctl reset-failed egressdns.service >/dev/null 2>&1 || true
+        systemctl start egressdns.service >/dev/null 2>&1 || true
+
+        # Rollback is the last line of defence, so it verifies itself rather than
+        # assuming. If the previous version does not come back, say so plainly: an
+        # operator who believes a rollback worked will not go looking.
+        local recovered=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if systemctl is-active --quiet egressdns.service; then
+                recovered=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$recovered" -eq 1 ]; then
+            log "rolled back; the previous version is running again"
+        else
+            warn "ROLLBACK INCOMPLETE: the previous version did not start."
+            warn "The previous binary, unit and configuration have been restored."
+            warn "Inspect: systemctl status egressdns; journalctl -xeu egressdns"
+        fi
     fi
 }
 
@@ -336,8 +366,8 @@ install_files() {
         local conf_src="$CONFIG_SOURCE"
         if [ -z "$conf_src" ]; then
             for candidate in \
-                "$STAGE_DIR/egressdns.production.toml" \
-                "config/egressdns.production.toml" \
+                "$STAGE_DIR/egressdns.toml" \
+                "config/egressdns.toml" \
                 "$STAGE_DIR/config.toml"; do
                 if [ -f "$candidate" ]; then conf_src="$candidate"; break; fi
             done
@@ -386,6 +416,41 @@ start_service() {
     fi
 }
 
+# One canary query, judged on the answer rather than on the exchange.
+#
+# This runs `egressdnsctl query`, not `dig`. Two reasons, and both were defects:
+#
+#   * `dig` is optional. A host without bind9-dnsutils skipped the check entirely, so a
+#     broken cutover was "verified" by a check that never ran.
+#   * `dig` exits 0 for SERVFAIL, REFUSED and NXDOMAIN alike — it asked and something
+#     replied. A resolver failing every query passed. See
+#     docs/incidents/2026-08-deployment-failure.md.
+#
+# `egressdnsctl query` ships with the daemon, so it is always present, and exits non-zero
+# unless the rcode is NOERROR with a record in the answer.
+canary() {
+    local host="$1" port="$2" proto="$3" name="${4:-example.com}"
+    local args=(query "$name" --server "$host" --port "$port" --require-answer --wait 4)
+    [ "$proto" = "tcp" ] && args+=(--tcp)
+    if ! "$(path "$BIN_DIR")/$CONTROL" "${args[@]}" >/dev/null 2>&1; then
+        warn "${proto} canary against ${host}:${port} did not return a usable answer"
+        return 1
+    fi
+    return 0
+}
+
+# A name that must fail DNSSEC validation, proving the resolver fails closed rather than
+# serving an answer it could not authenticate.
+canary_dnssec_bogus() {
+    local host="$1" port="$2"
+    if "$(path "$BIN_DIR")/$CONTROL" query dnssec-failed.org --server "$host" \
+        --port "$port" --dnssec --require-answer --wait 6 >/dev/null 2>&1; then
+        warn "a deliberately DNSSEC-bogus name was answered; validation is not failing closed"
+        return 1
+    fi
+    return 0
+}
+
 health_check() {
     [ -n "$ROOT_PREFIX" ] && return 0
     [ "$NO_START" -eq 1 ] && return 0
@@ -401,24 +466,23 @@ health_check() {
     host="${host%]}"
     if [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then host="127.0.0.1"; fi
 
-    if ! command -v dig >/dev/null 2>&1; then
-        warn "dig is not installed; skipping the DNS health checks"
-        return 0
-    fi
-
-    log "UDP health check against ${host}:${port}"
-    if ! dig @"$host" -p "$port" +timeout=3 +tries=2 +short example.com A >/dev/null; then
-        warn "the UDP health check did not return an answer"
+    log "UDP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "udp"; then
         ROLLBACK_NEEDED=1
-        die "post-install UDP health check failed"
+        die "post-install UDP canary failed"
     fi
-    log "TCP health check against ${host}:${port}"
-    if ! dig @"$host" -p "$port" +tcp +timeout=3 +tries=2 +short example.com A >/dev/null; then
-        warn "the TCP health check did not return an answer"
+    log "TCP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "tcp"; then
         ROLLBACK_NEEDED=1
-        die "post-install TCP health check failed"
+        die "post-install TCP canary failed"
     fi
-    log "health checks passed"
+    # Only meaningful when validation is on, which it is by default.
+    log "DNSSEC fail-closed canary against ${host}:${port}"
+    if ! canary_dnssec_bogus "$host" "$port"; then
+        ROLLBACK_NEEDED=1
+        die "the resolver answered a DNSSEC-bogus name"
+    fi
+    log "canaries passed"
 }
 
 main() {

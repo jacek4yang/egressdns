@@ -27,7 +27,7 @@ Or by hand, which is the same thing written out:
 ```sh
 sudo install -m 0755 egressdnsd egressdnsctl /usr/local/bin/
 sudo install -d -m 0750 /etc/egressdns /var/lib/egressdns
-sudo install -m 0640 egressdns.production.toml /etc/egressdns/config.toml
+sudo install -m 0640 egressdns.toml /etc/egressdns/config.toml
 sudo install -m 0644 egressdns.service /etc/systemd/system/
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin egressdns || true
 sudo chown -R egressdns:egressdns /var/lib/egressdns

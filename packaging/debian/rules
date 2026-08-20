@@ -19,7 +19,7 @@ override_dh_auto_test:
 override_dh_auto_install:
 	install -D -m 0755 target/release/egressdnsd   debian/egressdns/usr/bin/egressdnsd
 	install -D -m 0755 target/release/egressdnsctl debian/egressdns/usr/bin/egressdnsctl
-	install -D -m 0640 config/egressdns.production.toml \
+	install -D -m 0640 config/egressdns.toml \
 	    debian/egressdns/etc/egressdns/config.toml
 	install -D -m 0644 packaging/systemd/egressdns.service \
 	    debian/egressdns/lib/systemd/system/egressdns.service

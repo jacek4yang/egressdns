@@ -157,14 +157,24 @@ fn validate_server(cfg: &Config) -> Result<(), ConfigError> {
         .iter()
         .chain(s.tcp_listen.iter())
         .any(|a| !a.ip().is_loopback());
-    if exposed && s.allow_from.is_empty() {
-        return Err(err(
-            "server.allow_from",
-            "a non-loopback listener requires at least one allowed client network; \
-             leaving this empty would create an open resolver",
-        ));
+    // Omission and explicit emptiness are different intentions and get different
+    // answers. On loopback, omission means "the default, which is this machine". On a
+    // non-loopback listener there is no safe default to infer — the operator has to say
+    // who the resolver is for, because the alternative guess is an open resolver.
+    match &s.allow_from {
+        None if exposed => {
+            return Err(err(
+                "server.allow_from",
+                "a non-loopback listener requires an explicit list of allowed client \
+                 networks; without one this would be an open resolver. Add for example \
+                 allow_from = [\"192.168.0.0/16\", \"127.0.0.0/8\", \"::1/128\"]",
+            ));
+        }
+        // Explicitly empty is a deliberate deny-all and is respected, including on an
+        // exposed listener, where it is a way to bind now and admit clients later.
+        None | Some(_) => {}
     }
-    for net in &s.allow_from {
+    for net in s.allow_from.iter().flatten() {
         if net.addr().is_multicast() {
             return Err(err(
                 "server.allow_from",
@@ -380,11 +390,15 @@ fn validate_upstream(cfg: &Config) -> Result<(), ConfigError> {
                     format!("duplicate server name `{}` inside group", s.name),
                 ));
             }
-            if s.addresses.is_empty() {
+            // A route needs somewhere to send packets, but a *named* endpoint may get
+            // that at startup rather than from the file: the bootstrap resolver fills it
+            // in, and the cycle check runs before any of it reaches the network. An
+            // endpoint with neither a name nor an address is genuinely unusable.
+            if s.addresses.is_empty() && s.server_name.is_none() {
                 return Err(err(
                     format!("{sp}.addresses"),
-                    "at least one literal address is required; encrypted upstreams need \
-                     bootstrap addresses so the resolver never resolves its own upstream",
+                    "this upstream has neither an address nor a name, so there is nothing \
+                     to send a query to",
                 ));
             }
             for a in &s.addresses {
@@ -1138,7 +1152,7 @@ mod tests {
         let mut cfg = base();
         cfg.server.udp_listen = vec!["0.0.0.0:53".parse().expect("addr")];
         cfg.server.tcp_listen = vec![];
-        cfg.server.allow_from = vec![];
+        cfg.server.allow_from = None;
         let err = validate(&cfg).expect_err("must fail");
         assert!(err.to_string().contains("allow_from"));
     }

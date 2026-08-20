@@ -136,6 +136,13 @@ pub struct Resolver {
     pub cloudflare: SharedCloudflare,
     /// Address quality evidence.
     pub quality: Arc<QualityStore>,
+    /// Which names are known to be web services.
+    ///
+    /// Gates every use of port-443 evidence. Without it, an answer for an SSH host or a
+    /// mail exchanger would be ranked by how well its addresses complete a TLS handshake
+    /// on a port they do not serve, and every address in every answer would receive an
+    /// unsolicited connection.
+    pub services: crate::ranking::service::SharedServiceClassifier,
     /// Hot-name tracking.
     pub hotset: SharedHotSet,
     /// Probe work queue.
@@ -169,6 +176,7 @@ impl Resolver {
         network: SharedNetworkState,
         cloudflare: SharedCloudflare,
         quality: Arc<QualityStore>,
+        services: crate::ranking::service::SharedServiceClassifier,
         hotset: SharedHotSet,
         probes: ProbeQueue,
         roots: Arc<RootCertStore>,
@@ -226,6 +234,7 @@ impl Resolver {
             network,
             cloudflare,
             quality,
+            services,
             hotset,
             probes,
             roots,
@@ -257,7 +266,21 @@ impl Resolver {
     }
 
     /// Handle one client query end to end.
+    ///
+    /// The foreground deadline is established here, once, and carried on the task for
+    /// everything this request goes on to await — including the DNSSEC validator's own
+    /// DNSKEY and DS lookups, which come back through `SchedulerHandle` and would
+    /// otherwise each start their own budget.
     pub async fn handle(self: &Arc<Self>, request: &Message, transport: ClientTransport) -> Answer {
+        let deadline = Instant::now() + self.config.server.foreground_budget;
+        crate::dns::deadline::with_deadline(deadline, self.handle_inner(request, transport)).await
+    }
+
+    async fn handle_inner(
+        self: &Arc<Self>,
+        request: &Message,
+        transport: ClientTransport,
+    ) -> Answer {
         let max_size = self.max_response_size(request, transport);
 
         // ---- request validation -----------------------------------------------------
@@ -898,8 +921,11 @@ impl Resolver {
             // multiply into unbounded upstream work, and a wall-clock budget, so the
             // promise in `server.foreground_budget` holds for validated answers exactly as
             // it does for unvalidated ones.
+            // Waiting for a permit spends the client's time, so it is charged against the
+            // same deadline. Previously the wait could consume a whole budget and
+            // validation could then start a second one.
             let permit = match tokio::time::timeout(
-                budget,
+                crate::dns::deadline::remaining_or(budget),
                 Arc::clone(&self.validation_slots).acquire_owned(),
             )
             .await
@@ -922,7 +948,7 @@ impl Resolver {
             options.max_request_depth = self.config.dnssec.max_validation_depth;
             let request = hickory_proto::op::DnsRequest::new(message.clone(), options);
             use futures_util::StreamExt;
-            let outcome = tokio::time::timeout(budget, async {
+            let outcome = tokio::time::timeout(crate::dns::deadline::remaining_or(budget), async {
                 let mut stream = validator.send(request);
                 stream.next().await
             })
@@ -966,6 +992,16 @@ impl Resolver {
         if status == DnssecStatus::Bogus {
             return Err(ResolveError::DnssecBogus);
         }
+
+        // A negative answer nobody signed is the classic forgery: it is how censorship,
+        // captive portals and on-path injection make a name disappear, and unlike a
+        // forged address it leaves no evidence in the answer itself. So before an
+        // unsigned NXDOMAIN is trusted, a *different resolver authority* is asked. A
+        // Secure or Insecure-with-proof answer needs none of this, and neither does a
+        // positive one: this is the case where a second opinion is worth the query.
+        let (response, route) = self
+            .corroborate_negative(&group, &message, options, &response, status, route, seed)
+            .await;
 
         let kind = classify(&response);
         let raw_ttl = match kind {
@@ -1032,15 +1068,134 @@ impl Resolver {
         Ok(entry)
     }
 
+    /// Ask a second authority before believing an unsigned negative answer.
+    ///
+    /// Returns the answer to use and the route that produced it. When the second
+    /// authority agrees, or cannot be reached, or there is no independent one, the
+    /// original answer is returned unchanged — corroboration can only ever *replace a
+    /// negative with a positive*, never the reverse. That asymmetry is deliberate: an
+    /// attacker who can forge one resolver's answer should not be able to use this path
+    /// to erase a name, only to fail at hiding one.
+    #[allow(clippy::too_many_arguments)]
+    async fn corroborate_negative(
+        &self,
+        group: &Arc<crate::upstream::pool::UpstreamGroup>,
+        message: &Message,
+        options: DnsRequestOptions,
+        response: &Message,
+        status: DnssecStatus,
+        route: Option<crate::upstream::pool::RouteKey>,
+        seed: u64,
+    ) -> (Message, Option<crate::upstream::pool::RouteKey>) {
+        let original = (response.clone(), route.clone());
+
+        if !self.config.dnssec.corroborate_negative {
+            return original;
+        }
+        // Only unsigned negatives. A signed answer already proves itself, and a positive
+        // answer is not the shape this defends against.
+        if response.metadata.response_code != ResponseCode::NXDomain
+            || status == DnssecStatus::Secure
+        {
+            return original;
+        }
+        let Some(first) = route.as_ref() else {
+            return original;
+        };
+
+        // Whatever is left of the client's deadline, and never more than a small slice of
+        // it: the client is owed an answer, not a debate.
+        let remaining = crate::dns::deadline::remaining_or(self.config.server.foreground_budget);
+        let slice = remaining.mul_f64(0.5);
+        if slice.is_zero() {
+            return original;
+        }
+
+        let Some(second) = self
+            .scheduler
+            .corroborate(
+                group,
+                message.clone(),
+                options,
+                slice,
+                seed ^ 0x9E37_79B9,
+                &first.authority,
+            )
+            .await
+        else {
+            // No independent authority, or it did not answer. The original stands: an
+            // absent second opinion is not evidence either way.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "unavailable",
+            )
+            .increment(1);
+            return original;
+        };
+
+        if second.message.metadata.response_code == ResponseCode::NXDomain {
+            // Two independent resolvers agree the name does not exist.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "agreed",
+            )
+            .increment(1);
+            return original;
+        }
+
+        if second.message.metadata.response_code == ResponseCode::NoError
+            && !second.message.answers.is_empty()
+        {
+            // One resolver says the name is gone and an independent one returns records
+            // for it. The positive answer is the one that cannot be fabricated by
+            // deletion, so it wins, and the disagreement is recorded.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "negative_conflict",
+            )
+            .increment(1);
+            tracing::info!(
+                event = "corroboration.negative_conflict",
+                first = %first.authority,
+                second = %second.route.authority,
+                "an unsigned NXDOMAIN was contradicted by an independent resolver",
+            );
+            return (second.message, Some(second.route));
+        }
+
+        metrics::counter!(
+            crate::metrics::names::CORROBORATION_TOTAL,
+            "outcome" => "inconclusive",
+        )
+        .increment(1);
+        original
+    }
+
     /// Offer addresses from a fresh answer to the probe engine.
     ///
     /// This is a non-blocking hand-off. If the queue is full the observation is simply
     /// dropped: probes are optional evidence and must never slow down resolution.
     fn schedule_probes(&self, key: &CacheKey, entry: &CacheEntry) {
-        if !self.probes.is_enabled() || entry.kind != EntryKind::Positive {
+        // Read from the configuration published by this runtime-state generation rather
+        // than from the queue's own toggle, which a reload updates separately: one query
+        // must observe one coherent policy. `offer` still gates on the queue itself.
+        if !self.config.probe.enabled || entry.kind != EntryKind::Positive {
             return;
         }
+        // An HTTPS or SVCB answer is the protocol saying "this name is a service": note
+        // it, so the A and AAAA answers for the same name become rankable.
+        if crate::ranking::service::is_service_binding(key.qtype)
+            && !entry.message.answers.is_empty()
+        {
+            self.services.note_https(&key.name);
+        }
         if !matches!(key.qtype, RecordType::A | RecordType::AAAA) {
+            return;
+        }
+        // Port 443 is probed only where there is protocol evidence that something is
+        // listening on it. Otherwise the measurement is noise and the connection is
+        // unsolicited.
+        if !self.services.is_web_service(&key.name) {
             return;
         }
         let snapshot = self.cloudflare.prefixes();
@@ -1102,12 +1257,23 @@ impl Resolver {
         let qname = request.queries[0].name().to_string();
 
         let addresses = collect_addresses(&message, qtype);
-        let quality = self.quality.snapshot_for(&addresses, 443, &qname);
+        // Same rule on the read side: an answer with no service evidence is passed
+        // through in the order the authority gave it, because port-443 measurements say
+        // nothing about a name that is not an HTTPS service.
+        let is_web = self.services.is_web_service(&qname);
+        let quality = if is_web {
+            self.quality.snapshot_for(&addresses, 443, &qname)
+        } else {
+            Default::default()
+        };
         let snapshot = self.cloudflare.prefixes();
         let now_unix = crate::util::time::SystemClock.unix_secs_now();
-        let verified = if self.cloudflare.enabled()
-            && self.cloudflare.mode() == CloudflareMode::VerifiedAugment
-        {
+        // One coherent policy generation for this answer: `enabled` and the configured
+        // mode come from the `Config` this runtime state published, and only the live
+        // operational override is read from the shared Cloudflare state.
+        let cloudflare_enabled = self.config.cloudflare.enabled;
+        let cloudflare_mode = self.cloudflare.effective_mode(self.config.cloudflare.mode);
+        let verified = if cloudflare_enabled && cloudflare_mode == CloudflareMode::VerifiedAugment {
             let store = Arc::clone(&self.quality);
             let ranking = self.config.ranking.clone();
             let host = qname.clone();
@@ -1137,8 +1303,8 @@ impl Resolver {
         let ctx = AnswerContext {
             qtype,
             dnssec: entry.dnssec,
-            cloudflare_enabled: self.cloudflare.enabled(),
-            cloudflare_mode: self.cloudflare.mode(),
+            cloudflare_enabled,
+            cloudflare_mode,
             snapshot: snapshot.as_ref().as_ref(),
             domain_excluded: crate::policy::cloudflare::is_excluded(
                 &qname,

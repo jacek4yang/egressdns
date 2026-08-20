@@ -618,9 +618,22 @@ impl Daemon {
     /// The fragment must not specify listeners; they are bound here on ephemeral ports so
     /// tests never need a fixed port or elevated privileges.
     pub async fn start(fragment: &str) -> Self {
+        Self::start_tuned(fragment, |_| {}).await
+    }
+
+    /// Start a daemon, adjusting the parsed configuration before assembly.
+    ///
+    /// Scheduler tuning — hedging, exploration, circuit thresholds, fan-out — is no
+    /// longer a configuration surface, because those are decisions the resolver makes
+    /// from measurement rather than preferences an operator should have to hold. The
+    /// internal structures still exist, so a test that needs to pin one reaches it
+    /// directly here instead of through a file that users would then be able to write.
+    pub async fn start_tuned(fragment: &str, tune: impl FnOnce(&mut Config)) -> Self {
         egressdns::tls::install_crypto_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("egressdns.toml");
+        // The fragment comes first: `upstreams` and `proxies` are top-level keys, and
+        // TOML requires those to precede every table.
         let preamble = format!(
             r#"
 [server]
@@ -640,12 +653,20 @@ path = "{}/state.sqlite3"
 "#,
             dir.path().display()
         );
-        let text = format!("{preamble}\n{fragment}\n");
+        let text = format!("{fragment}\n{preamble}\n");
         std::fs::write(&config_path, &text).expect("write config");
-        let config = Arc::new(
-            Config::from_toml(&text, &config_path.display().to_string())
-                .expect("test configuration must be valid"),
-        );
+        let mut config = Config::from_toml(&text, &config_path.display().to_string())
+            .expect("test configuration must be valid");
+        tune(&mut config);
+        Self::launch(Arc::new(config), dir, config_path).await
+    }
+
+    /// Bind listeners and assemble the app from an already-parsed configuration.
+    async fn launch(
+        config: Arc<Config>,
+        dir: tempfile::TempDir,
+        config_path: std::path::PathBuf,
+    ) -> Self {
         let app = App::from_config(Arc::clone(&config), config_path.clone()).expect("assemble app");
         let ingress = Ingress::new(Arc::clone(&app));
 
@@ -797,7 +818,8 @@ path = "{}/state.sqlite3"
 "#,
             self.dir.path().display()
         );
-        let text = format!("{preamble}\n{fragment}\n");
+        // Fragment first: top-level keys must precede every table, matching `start_tuned`.
+        let text = format!("{fragment}\n{preamble}\n");
         std::fs::write(&self.config_path, &text).expect("write config");
         text
     }
@@ -826,69 +848,15 @@ path = "{}/state.sqlite3"
     }
 }
 
-/// Configuration fragment for a single plain-UDP upstream group.
+/// Configuration fragment naming one plain-UDP upstream.
+///
+/// `SocketAddr` renders as `ip:port` for IPv4 and `[ip]:port` for IPv6, which is exactly
+/// the bare-address form the endpoint parser accepts.
 pub fn udp_upstream_fragment(addr: SocketAddr) -> String {
     format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "mock-udp"
-transport = "udp"
-addresses = ["{ip}"]
-port = {port}
-enable_cookies = false
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
-
-[dnssec]
-mode = "off"
-
-[probe]
-enabled = false
-
-[prefetch]
-enabled = false
-"#,
-        ip = addr.ip(),
-        port = addr.port()
-    )
-}
-
-/// Configuration fragment for a single upstream group with several plain-UDP servers.
-///
-/// All servers sit in one group, so the scheduler ranks them against each other;
-/// hedging requires at least two rankable routes, which means at least two addresses.
-pub fn udp_upstream_fragment_multi(addrs: &[SocketAddr]) -> String {
-    let servers: String = addrs
-        .iter()
-        .enumerate()
-        .map(|(i, addr)| {
-            format!(
-                r#"
-[[upstream.groups.servers]]
-name = "mock-udp-{i}"
-transport = "udp"
-addresses = ["{ip}"]
-port = {port}
-enable_cookies = false
-"#,
-                ip = addr.ip(),
-                port = addr.port()
-            )
-        })
-        .collect();
-    format!(
-        r#"
-[[upstream.groups]]
-name = "default"
-{servers}
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
+upstreams = ["{addr}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -899,6 +867,29 @@ enabled = false
 [prefetch]
 enabled = false
 "#
+    )
+}
+
+/// Configuration fragment naming several plain-UDP upstreams.
+///
+/// The scheduler ranks them against each other; hedging needs at least two.
+pub fn udp_upstream_fragment_multi(addrs: &[SocketAddr]) -> String {
+    let list: Vec<String> = addrs.iter().map(|a| format!("\"{a}\"")).collect();
+    format!(
+        r#"
+upstreams = [{}]
+proxies = []
+
+[dnssec]
+mode = "off"
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#,
+        list.join(", ")
     )
 }
 
