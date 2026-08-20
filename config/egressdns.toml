@@ -8,13 +8,14 @@
 # when to give up on a path — all from what it measures on your network. Those are not
 # preferences, and asking you to hold them in your head would be asking you to guess.
 
-upstreams = [
-    "1.1.1.1",
-    "2606:4700:4700::1111",
-    "https://cloudflare-dns.com/dns-query",
-    "https://dns.google/dns-query",
-    "tls://dns.quad9.net",
-]
+# The built-in "recommended" set: five independently operated public resolvers, each
+# with its plaintext seeds and its encrypted endpoints. `egressdnsctl builtins` lists
+# what it expands to and where each endpoint came from.
+#
+# Naming your own is equally fine, and mixing the two is fine too:
+#
+#   upstreams = ["builtin:recommended", "tls://dns.internal.example?addr=10.0.0.53"]
+upstreams = ["builtin:recommended"]
 
 # Egress proxies, tried when the direct path is unhealthy. Which one is used, and whether
 # one is used at all, is decided from measured path health.

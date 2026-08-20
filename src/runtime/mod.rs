@@ -327,15 +327,36 @@ impl App {
         self.cloudflare.reconfigure(&config.cloudflare);
     }
 
-    /// Whether the daemon is ready.
+    /// Whether the daemon is ready to answer queries.
+    ///
+    /// Two conditions, both necessary. The listeners must be up — that is the flag — and
+    /// there must be at least one upstream route to send a query to. A resolver with no
+    /// routes cannot answer anything except SERVFAIL, and reporting it ready tells an
+    /// orchestrator to send it traffic and an installer that the cutover worked. That is
+    /// exactly the failure in `docs/incidents/2026-08-deployment-failure.md`, where every
+    /// signal read healthy while every query failed.
+    ///
+    /// Deliberately *not* a health check of the routes: a route whose circuit is open or
+    /// whose last probe failed still counts, because upstreams recover and refusing
+    /// traffic in the meantime converts a degraded resolver into an outage. The bar is
+    /// "somewhere to send it", which is the thing whose absence is unrecoverable.
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Relaxed)
+        self.ready.load(Ordering::Relaxed) && self.has_usable_routes()
     }
 
-    /// Mark the daemon ready or not ready.
+    /// Whether any upstream route exists to send a query to.
+    pub fn has_usable_routes(&self) -> bool {
+        !self.state().registry.all_routes().is_empty()
+    }
+
+    /// Mark the listeners up or down.
+    ///
+    /// The published readiness is this *and* [`App::has_usable_routes`]; see
+    /// [`App::is_ready`].
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Relaxed);
-        metrics::gauge!(crate::metrics::names::READY).set(if ready { 1.0 } else { 0.0 });
+        let published = ready && self.has_usable_routes();
+        metrics::gauge!(crate::metrics::names::READY).set(if published { 1.0 } else { 0.0 });
     }
 
     /// Successful reload count.

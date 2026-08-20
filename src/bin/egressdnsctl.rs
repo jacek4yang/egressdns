@@ -104,6 +104,15 @@ enum Command {
     /// Answered locally without contacting the daemon: an operator planning a change
     /// needs this before deciding between `systemctl reload` and `systemctl restart`.
     ReloadContract,
+    /// List the built-in resolver profiles and what they expand to.
+    ///
+    /// Answered locally, so `upstreams = ["builtin:recommended"]` can be inspected
+    /// before it is deployed: a set of resolvers an operator has not seen is a set of
+    /// resolvers an operator cannot audit.
+    Builtins {
+        /// Show one profile in full, with each provider's endpoints and source.
+        profile: Option<String>,
+    },
     /// Show upstream routes and their health.
     Upstreams,
     /// Show IPv4/IPv6 environment state and the network generation.
@@ -177,6 +186,70 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print the catalog, either as an index or as one profile in full.
+fn run_builtins(profile: Option<&str>, json: bool) -> Result<ExitCode> {
+    use egressdns::config::builtins;
+
+    let Some(name) = profile else {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&builtins::profile_names())?
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        println!("Built-in resolver profiles. Use one as `upstreams = [\"builtin:<name>\"]`.\n");
+        for name in builtins::profile_names() {
+            let Some(profile) = builtins::profile(name) else {
+                continue;
+            };
+            let operators: Vec<&str> = profile
+                .members
+                .iter()
+                .filter_map(|id| builtins::provider(id).map(|p| p.operator))
+                .collect();
+            println!("  {name}\n    {}", profile.description);
+            println!("    {}\n", operators.join(", "));
+        }
+        println!("`egressdnsctl builtins <name>` shows one in full.");
+        return Ok(ExitCode::SUCCESS);
+    };
+
+    let Some(profile) = builtins::profile(name) else {
+        eprintln!(
+            "no built-in profile named `{name}`; try one of: {}",
+            builtins::profile_names().join(", ")
+        );
+        return Ok(ExitCode::from(2));
+    };
+
+    if json {
+        let uris = builtins::expand(name).unwrap_or_default();
+        println!("{}", serde_json::to_string_pretty(&uris)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("builtin:{name} — {}\n", profile.description);
+    for id in profile.members {
+        let Some(p) = builtins::provider(id) else {
+            continue;
+        };
+        println!("  {} ({})", p.operator, p.id);
+        println!("    addresses  {}", p.addresses.join(", "));
+        for (label, endpoint) in [("DoH", p.doh), ("DoT", p.dot), ("DoQ", p.doq)] {
+            if let Some(e) = endpoint {
+                println!("    {label}        {e}");
+            }
+        }
+        println!("    filtering  {:?}", p.filtering);
+        if !p.notes.is_empty() {
+            println!("    notes      {}", p.notes);
+        }
+        println!("    source     {} (checked {})\n", p.source, p.verified);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run(cli: Cli) -> Result<ExitCode> {
     // `check-config` is answered locally when the daemon is not reachable, so an operator
     // can validate a file before starting anything.
@@ -190,6 +263,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}\n    {}\n", item.field, item.reason);
         }
         return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Command::Builtins { profile } = &cli.command {
+        return run_builtins(profile.as_deref(), cli.json);
     }
 
     if let Command::Query {
@@ -398,6 +475,7 @@ fn encode(command: &Command) -> (String, Vec<String>) {
         Command::Query { .. } => ("query".into(), vec![]),
         // Answered locally before this point is reached; never sent to the daemon.
         Command::ReloadContract => ("reload-contract".into(), vec![]),
+        Command::Builtins { .. } => ("builtins".into(), vec![]),
         Command::Reload => ("reload".into(), vec![]),
         Command::Upstreams => ("upstreams".into(), vec![]),
         Command::Network => ("network".into(), vec![]),
