@@ -193,13 +193,17 @@ make_dirs() {
 # HTTP/2, which no number of retries would fix.
 fetch() {
     local url="$1" dest="$2"
-    if curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
-        --connect-timeout 20 --max-time 300 -o "$dest" "$url"; then
+    # A slow link is not a failure. Rather than a wall-clock limit — which punishes a
+    # large artifact on a thin connection — abort only when throughput actually stalls:
+    # under 1 KB/s sustained for a minute. The generous --max-time is a backstop against
+    # a connection that trickles forever.
+    local common=(-fsSL --retry 5 --retry-delay 3 --retry-all-errors
+        --connect-timeout 20 --speed-limit 1024 --speed-time 60 --max-time 1800)
+    if curl "${common[@]}" -o "$dest" "$url"; then
         return 0
     fi
     warn "download failed over HTTP/2; retrying with HTTP/1.1"
-    curl -fsSL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors \
-        --connect-timeout 20 --max-time 300 -o "$dest" "$url"
+    curl --http1.1 "${common[@]}" -o "$dest" "$url"
 }
 
 backup_existing() {
