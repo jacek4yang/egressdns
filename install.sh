@@ -463,12 +463,121 @@ start_service() {
 #
 # `egressdnsctl query` ships with the daemon, so it is always present, and exits non-zero
 # unless the rcode is NOERROR with a record in the answer.
+# Where the last canary's structured result was written, so a failure can be explained
+# rather than merely reported.
+CANARY_LAST=""
+
+# One canary query, judged on the answer rather than on the exchange.
+#
+# Run with proxy interception cleared. `proxychains` hooks connect(2) through LD_PRELOAD
+# and, with no `localnet` bypass, redirects *every* TCP connection to the SOCKS proxy —
+# including one to 127.0.0.1. That sent this health check to a proxy on another host and
+# asked it to reach its own loopback, so the stream closed with no RFC 7766 length prefix
+# and the install rolled back every time. UDP was untouched, which is why the symptom was
+# UDP-passes-TCP-fails and looked like a daemon defect.
+#
+# The question a local canary asks is "is the resolver on *this machine* answering".
+# Through an intermediary it answers a different question. Downloads keep the proxy; this
+# does not. See docs/incidents/2026-08-installer-tcp-canary.md.
 canary() {
-    local host="$1" port="$2" proto="$3" name="${4:-example.com}"
-    local args=(query "$name" --server "$host" --port "$port" --require-answer --wait 4)
+    local host="$1" port="$2" proto="$3" name="${4:-localhost}" want_dnssec="${5:-}"
+    local args=(query "$name" --server "$host" --port "$port" --require-answer --wait 6 --json)
     [ "$proto" = "tcp" ] && args+=(--tcp)
-    if ! "$(path "$BIN_DIR")/$CONTROL" "${args[@]}" >/dev/null 2>&1; then
-        warn "${proto} canary against ${host}:${port} did not return a usable answer"
+    [ -n "$want_dnssec" ] && args+=(--dnssec)
+
+    CANARY_LAST="$(env -u LD_PRELOAD -u LD_LIBRARY_PATH \
+        -u ALL_PROXY -u all_proxy \
+        -u HTTP_PROXY -u http_proxy \
+        -u HTTPS_PROXY -u https_proxy \
+        "$(path "$BIN_DIR")/$CONTROL" "${args[@]}" 2>&1)" && return 0
+
+    warn "${proto} canary for ${name} against ${host}:${port} did not return a usable answer"
+    return 1
+}
+
+# Print everything known about a canary failure, and keep it.
+#
+# The original discarded stdout and stderr, so an operator saw one sentence and had
+# nothing to act on.
+canary_failed() {
+    local what="$1"
+    warn "${what} failed:"
+    if [ -n "$CANARY_LAST" ]; then
+        printf '%s\n' "$CANARY_LAST" | sed 's/^/    /' >&2
+    else
+        printf '    (no output captured)\n' >&2
+    fi
+
+    DIAG_DIR="${DIAG_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/egressdns-install-diagnostics.XXXXXX")}"
+    {
+        printf '=== %s ===\n' "$what"
+        printf '%s\n\n' "$CANARY_LAST"
+        printf '=== systemctl status ===\n'
+        systemctl status egressdns --no-pager 2>&1 | head -40
+        printf '\n=== recent journal ===\n'
+        journalctl -u egressdns --no-pager --since "-5 minutes" 2>&1 | tail -60
+        printf '\n=== listeners ===\n'
+        ss -lntup 2>&1 | grep -E ':(53|1053)\b' || true
+        printf '\n=== effective configuration ===\n'
+        "$(path "$BIN_DIR")/$DAEMON" --config "$(path "$CONF_DIR")/config.toml" \
+            --dump-config 2>&1 | head -80
+    } > "$DIAG_DIR/report.txt" 2>&1
+    # The effective configuration redacts secrets already; proxy credentials never reach
+    # it. Strip anything that looks like userinfo from the transcript for good measure.
+    sed -i -E 's#(socks5h?|https?)://[^/@[:space:]]+:[^/@[:space:]]+@#\1://<redacted>@#g' \
+        "$DIAG_DIR/report.txt" 2>/dev/null || true
+
+    warn ""
+    warn "Recent daemon logs and the effective configuration were saved to:"
+    warn "  $DIAG_DIR/report.txt"
+    warn "It is kept after rollback so the failure can be diagnosed."
+}
+
+# Prove local ingress, without needing the Internet.
+#
+# `localhost` is answered by EgressDNS itself from the special-use registry, so this tests
+# listener binding, ACL admission, parsing, DNS-over-TCP framing and serialisation — and
+# nothing else. Resolving a public name here would let upstream trouble fail a listener
+# test, which is how a network problem came to look like a TCP ingress bug.
+local_canaries() {
+    local host="$1" port="$2"
+    log "local UDP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "udp" "localhost"; then
+        canary_failed "local UDP canary"
+        return 1
+    fi
+    log "local TCP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "tcp" "localhost"; then
+        canary_failed "local TCP canary"
+        return 1
+    fi
+    return 0
+}
+
+# Prove forwarding actually works, with a quorum rather than one fragile name.
+#
+# A single public name makes installation depend on that name resolving from this network
+# at this moment. Two of three is enough to distinguish "forwarding is broken" from "one
+# domain is having a bad day".
+external_canaries() {
+    local host="$1" port="$2"
+    local ok=0 tried=0
+    for name in example.com cloudflare.com wikipedia.org; do
+        tried=$((tried + 1))
+        if canary "$host" "$port" "udp" "$name"; then
+            ok=$((ok + 1))
+        fi
+        [ "$ok" -ge 2 ] && break
+    done
+    if [ "$ok" -lt 2 ]; then
+        canary_failed "forwarding canary (${ok}/${tried} public names resolved)"
+        return 1
+    fi
+    log "forwarding canary passed (${ok}/${tried} public names resolved)"
+    # One forwarded answer over TCP ingress too, so the stream path is exercised end to
+    # end rather than only against the locally answered name.
+    if ! canary "$host" "$port" "tcp" "example.com"; then
+        canary_failed "forwarding canary over TCP"
         return 1
     fi
     return 0
@@ -478,12 +587,41 @@ canary() {
 # serving an answer it could not authenticate.
 canary_dnssec_bogus() {
     local host="$1" port="$2"
-    if "$(path "$BIN_DIR")/$CONTROL" query dnssec-failed.org --server "$host" \
-        --port "$port" --dnssec --require-answer --wait 6 >/dev/null 2>&1; then
+    if canary "$host" "$port" "udp" "dnssec-failed.org" "dnssec"; then
         warn "a deliberately DNSSEC-bogus name was answered; validation is not failing closed"
         return 1
     fi
     return 0
+}
+
+# A signed name should carry AD when validation is on. Advisory: a network that filters
+# DNSSEC records can fail this without the installation being wrong.
+canary_dnssec_secure() {
+    local host="$1" port="$2"
+    if canary "$host" "$port" "udp" "cloudflare.com" "dnssec"; then
+        return 0
+    fi
+    return 1
+}
+
+# Poll for real readiness with bounded exponential backoff.
+#
+# "systemd says active" is not readiness: the unit is active the moment the process
+# signals it, and a canary fired immediately afterwards can race listener binding or the
+# first upstream bootstrap. Never retries indefinitely.
+wait_ready() {
+    local host="$1" port="$2"
+    local delay=1 waited=0 limit=45
+    while [ "$waited" -lt "$limit" ]; do
+        if systemctl is-active --quiet egressdns.service &&
+            canary "$host" "$port" "udp" "localhost"; then
+            return 0
+        fi
+        sleep "$delay"
+        waited=$((waited + delay))
+        [ "$delay" -lt 8 ] && delay=$((delay * 2))
+    done
+    return 1
 }
 
 health_check() {
@@ -501,22 +639,44 @@ health_check() {
     host="${host%]}"
     if [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then host="127.0.0.1"; fi
 
-    log "UDP canary against ${host}:${port}"
-    if ! canary "$host" "$port" "udp"; then
+    # Wait for the daemon to be genuinely ready rather than sleeping a fixed second. A
+    # canary that races startup produces a failure that looks like a defect and is not.
+    wait_ready "$host" "$port" || {
         ROLLBACK_NEEDED=1
-        die "post-install UDP canary failed"
-    fi
-    log "TCP canary against ${host}:${port}"
-    if ! canary "$host" "$port" "tcp"; then
+        canary_failed "the service did not become ready"
+        die "the service did not become ready"
+    }
+
+    # Local ingress first, with a name the daemon answers itself. If this fails the
+    # listener is broken; nothing beyond it is worth testing.
+    if ! local_canaries "$host" "$port"; then
         ROLLBACK_NEEDED=1
-        die "post-install TCP canary failed"
+        die "local ingress canary failed"
     fi
-    # Only meaningful when validation is on, which it is by default.
+
+    # Then forwarding, which is a different subsystem and a different failure.
+    if ! external_canaries "$host" "$port"; then
+        ROLLBACK_NEEDED=1
+        die "forwarding canary failed"
+    fi
+
+    # Fail-closed is a correctness property and is not optional.
     log "DNSSEC fail-closed canary against ${host}:${port}"
     if ! canary_dnssec_bogus "$host" "$port"; then
         ROLLBACK_NEEDED=1
+        canary_failed "DNSSEC fail-closed canary"
         die "the resolver answered a DNSSEC-bogus name"
     fi
+
+    # AD on a signed name is advisory: a network that strips DNSSEC records can fail this
+    # without the installation being wrong.
+    if canary_dnssec_secure "$host" "$port"; then
+        DNSSEC_SECURE_RESULT="PASS"
+    else
+        DNSSEC_SECURE_RESULT="WARN"
+        warn "a DNSSEC-signed name did not validate; this network may filter DNSSEC records"
+    fi
+
     log "canaries passed"
 }
 
