@@ -5,7 +5,7 @@
 //! interesting cases — a router that forwards back to us, a gateway that is really this
 //! machine — are the ones nobody has a spare network for.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use hickory_proto::op::{Message, Query};
@@ -91,10 +91,12 @@ pub async fn probe_gateway(listeners: &[SocketAddr], instance: u64) -> GatewayPr
 /// first is the one that is close, and that is the whole question. Falls back to Global,
 /// which is the set that works from most places.
 pub async fn detect_region() -> Region {
-    let china: SocketAddr = "223.5.5.5:53".parse().expect("literal");
-    let global: SocketAddr = "1.1.1.1:53".parse().expect("literal");
+    // Constructed rather than parsed: an address built from its octets cannot fail, so
+    // there is no error to handle and no panic to reach for.
+    const CHINA: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)), 53);
+    const GLOBAL: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53);
 
-    let (cn, gl) = tokio::join!(timed(china, "example.com"), timed(global, "example.com"),);
+    let (cn, gl) = tokio::join!(timed(CHINA, "example.com"), timed(GLOBAL, "example.com"),);
 
     match (cn, gl) {
         (Some(a), Some(b)) if a < b => Region::China,
@@ -127,10 +129,10 @@ async fn query_udp(server: SocketAddr, name: &str, qtype: RecordType) -> Option<
     let id = message.metadata.id;
     let bytes = message.to_vec().ok()?;
 
-    let bind: SocketAddr = if server.is_ipv4() {
-        "0.0.0.0:0".parse().ok()?
+    let bind = if server.is_ipv4() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
     } else {
-        "[::]:0".parse().ok()?
+        SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
     };
 
     let result = tokio::time::timeout(GATEWAY_PROBE_TIMEOUT, async {
