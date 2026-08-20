@@ -111,7 +111,7 @@ jobs:
             cp "target/${target}/release/egressdnsd"  "$STAGE/"
             cp "target/${target}/release/egressdnsctl" "$STAGE/"
             cp packaging/systemd/egressdns.service "$STAGE/"
-            cp config/egressdns.production.toml "$STAGE/"
+            cp config/egressdns.toml "$STAGE/"
             cp LICENSE-MIT LICENSE-APACHE "$STAGE/"
             cp install.sh upgrade.sh uninstall.sh "$STAGE/"
             cp docs/INSTALL-RELEASE.md "$STAGE/INSTALL.md"

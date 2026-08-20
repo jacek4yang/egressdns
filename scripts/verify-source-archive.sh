@@ -62,9 +62,9 @@ for required in \
     egressdns/src/lib.rs \
     egressdns/src/bin/egressdnsd.rs \
     egressdns/src/bin/egressdnsctl.rs \
-    egressdns/config/egressdns.minimal.toml \
-    egressdns/config/egressdns.example.toml \
-    egressdns/config/egressdns.production.toml \
+    egressdns/config/egressdns.lan.example.toml \
+    egressdns/config/egressdns.toml \
+    egressdns/config/egressdns.toml \
     egressdns/packaging/systemd/egressdns.service \
     egressdns/.github/workflows/ci.yml \
     egressdns/.github/workflows/release.yml \

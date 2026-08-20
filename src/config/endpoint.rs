@@ -214,7 +214,12 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
                     .unwrap_or_else(|| String::from("/dns-query")),
                 p => p.to_string(),
             };
-            Ok(doh_candidates(host, url.port().unwrap_or(443), &path, hints))
+            Ok(doh_candidates(
+                host,
+                url.port().unwrap_or(443),
+                &path,
+                hints,
+            ))
         }
         "tls" => Ok(vec![Endpoint {
             transport: TransportKind::Dot,
@@ -259,12 +264,7 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
 }
 
 /// One DoH endpoint becomes an HTTP/3 candidate and an HTTP/2 candidate.
-fn doh_candidates(
-    host: EndpointHost,
-    port: u16,
-    path: &str,
-    hints: Vec<IpAddr>,
-) -> Vec<Endpoint> {
+fn doh_candidates(host: EndpointHost, port: u16, path: &str, hints: Vec<IpAddr>) -> Vec<Endpoint> {
     vec![
         Endpoint {
             transport: TransportKind::Doh3,

@@ -421,6 +421,9 @@ mod tests {
     use std::path::PathBuf;
 
     const MINIMAL: &str = r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:0"]
 tcp_listen = ["127.0.0.1:0"]

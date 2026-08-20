@@ -1,0 +1,30 @@
+# EgressDNS — serving a LAN.
+#
+# The difference from the default file is one table. Exposing the resolver beyond this
+# machine requires naming the client networks explicitly: with a non-loopback listener and
+# no `allow_from`, startup is refused rather than guessing, because the guess would be an
+# open resolver.
+#
+# Replace the example prefixes with your own before using this.
+
+upstreams = [
+    "1.1.1.1",
+    "2606:4700:4700::1111",
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/dns-query",
+    "tls://dns.quad9.net",
+]
+
+proxies = []
+
+[server]
+udp_listen = ["0.0.0.0:53", "[::]:53"]
+tcp_listen = ["0.0.0.0:53", "[::]:53"]
+
+# EDIT THIS. Only these networks may query the resolver. Loopback is listed explicitly
+# because naming any network at all replaces the loopback default.
+allow_from = [
+    "192.168.0.0/16",   # EXAMPLE — replace with your LAN
+    "127.0.0.0/8",
+    "::1/128",
+]

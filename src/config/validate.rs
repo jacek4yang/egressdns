@@ -390,11 +390,15 @@ fn validate_upstream(cfg: &Config) -> Result<(), ConfigError> {
                     format!("duplicate server name `{}` inside group", s.name),
                 ));
             }
-            if s.addresses.is_empty() {
+            // A route needs somewhere to send packets, but a *named* endpoint may get
+            // that at startup rather than from the file: the bootstrap resolver fills it
+            // in, and the cycle check runs before any of it reaches the network. An
+            // endpoint with neither a name nor an address is genuinely unusable.
+            if s.addresses.is_empty() && s.server_name.is_none() {
                 return Err(err(
                     format!("{sp}.addresses"),
-                    "at least one literal address is required; encrypted upstreams need \
-                     bootstrap addresses so the resolver never resolves its own upstream",
+                    "this upstream has neither an address nor a name, so there is nothing \
+                     to send a query to",
                 ));
             }
             for a in &s.addresses {

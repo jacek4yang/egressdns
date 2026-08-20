@@ -43,7 +43,10 @@ impl ProxyKind {
 
     /// Whether the proxy resolves target names itself.
     pub fn resolves_target_names(self) -> bool {
-        matches!(self, Self::Socks5Hostname | Self::HttpConnect | Self::HttpsConnect)
+        matches!(
+            self,
+            Self::Socks5Hostname | Self::HttpConnect | Self::HttpsConnect
+        )
     }
 
     /// Whether this proxy can carry a TCP byte stream.
@@ -259,8 +262,14 @@ mod tests {
     /// bootstrap: who resolves the target name.
     #[test]
     fn socks5h_delegates_name_resolution_and_socks5_does_not() {
-        assert!(!parse("socks5://h:1").expect("ok").kind.resolves_target_names());
-        assert!(parse("socks5h://h:1").expect("ok").kind.resolves_target_names());
+        assert!(!parse("socks5://h:1")
+            .expect("ok")
+            .kind
+            .resolves_target_names());
+        assert!(parse("socks5h://h:1")
+            .expect("ok")
+            .kind
+            .resolves_target_names());
     }
 
     /// The capability matrix is a promise the transport layer has to keep.

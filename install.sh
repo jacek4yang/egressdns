@@ -336,8 +336,8 @@ install_files() {
         local conf_src="$CONFIG_SOURCE"
         if [ -z "$conf_src" ]; then
             for candidate in \
-                "$STAGE_DIR/egressdns.production.toml" \
-                "config/egressdns.production.toml" \
+                "$STAGE_DIR/egressdns.toml" \
+                "config/egressdns.toml" \
                 "$STAGE_DIR/config.toml"; do
                 if [ -f "$candidate" ]; then conf_src="$candidate"; break; fi
             done

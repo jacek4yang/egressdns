@@ -78,10 +78,12 @@ fn pin_transport(config: &mut egressdns::config::Config, transport: &str) {
     };
     for group in &mut config.upstream.groups {
         group.servers.retain(|s| s.transport == want);
-        assert!(!group.servers.is_empty(), "no {transport} route after pinning");
+        assert!(
+            !group.servers.is_empty(),
+            "no {transport} route after pinning"
+        );
     }
 }
-
 
 async fn check_transport(transport: &str, pick: fn(&common::MockServers) -> Option<SocketAddr>) {
     let handler = MockUpstream::new();

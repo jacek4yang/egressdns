@@ -623,6 +623,9 @@ mod tests {
     }
 
     const MINIMAL: &str = r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:0"]
 tcp_listen = ["127.0.0.1:0"]
@@ -693,14 +696,17 @@ enabled = false
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_config(&dir, MINIMAL);
         let app = App::build(&path).expect("build");
-        // A non-loopback listener with no ACL would create an open resolver.
+        // A semantic failure that is *not* restart-required, so the refusal under test is
+        // the semantic one rather than the listener check firing first. The open-resolver
+        // ACL rule is a load-time rule and is covered in tests/config.rs.
         std::fs::write(
             &path,
-            "[server]\nudp_listen = [\"0.0.0.0:0\"]\ntcp_listen = []\nallow_from = []\n",
+            "upstreams = [\"ftp://nope.example\"]\nproxies = []\n[server]\n\
+             udp_listen = [\"127.0.0.1:0\"]\ntcp_listen = [\"127.0.0.1:0\"]\n",
         )
         .expect("write");
         let err = app.reload().expect_err("must fail");
-        assert!(err.contains("allow_from"), "unexpected error: {err}");
+        assert!(err.contains("upstreams"), "unexpected error: {err}");
     }
 
     #[tokio::test]

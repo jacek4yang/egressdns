@@ -15,24 +15,30 @@ design contract, and it is tested.
 ## The whole configuration
 
 ```toml
-version = 2
 upstreams = [
     "1.1.1.1",
-    "2606:4700:4700::1111",
     "https://cloudflare-dns.com/dns-query",
-    "tls://dns.quad9.net",
+    "https://dns.google/dns-query",
 ]
+
+proxies = []
 ```
 
 That is a complete, working file. Listeners default to loopback, so a minimal
 configuration cannot accidentally become an open resolver.
 
 You describe *where to ask*. The daemon decides *how*: UDP or TCP, HTTP/2 or HTTP/3, IPv4
-or IPv6, which endpoint to prefer, when to hedge, when to break a circuit and when to try
-a recovered path again — all from what it measures on your actual network, not from
-constants you had to guess in advance. A single `https://` entry becomes both an HTTP/3 and
-an HTTP/2 route candidate for one logical resolver, and the scheduler picks between them
-and falls back on its own evidence.
+or IPv6, direct or through a proxy, which endpoint to prefer, when to hedge, when to break
+a circuit and when to try a recovered path again — all from what it measures on your
+network, not from constants you had to guess in advance. A single `https://` entry becomes
+both an HTTP/3 and an HTTP/2 route candidate for one logical resolver, and the scheduler
+picks between them and falls back on its own evidence.
+
+Add proxies and they are used the same way — as paths to measure, not as instructions:
+
+```toml
+proxies = ["socks5h://127.0.0.1:1080", "http://127.0.0.1:7890"]
+```
 
 Before cutting over, ask what would break:
 
@@ -48,8 +54,13 @@ filters port 853", which otherwise look identical. Every result is `PASS`, `WARN
 `FAIL`, `NOT_APPLICABLE` or `NOT_TESTED`; a `FAIL` exits non-zero. A check that could not
 look says so rather than reporting success.
 
-Every low-level setting is still available for the cases that need it — see
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md) — but you should not need any of them.
+There is no configuration version field, and no low-level transport form. Transport,
+HTTP version, address family and direct-versus-proxy are not preferences an operator
+should have to hold — they are measurements. A file from before 2.0 is refused by name
+with a pointer to [the migration guide](docs/MIGRATION-V1-TO-V2.md), never half-applied.
+
+Operational settings that *are* deployment facts — listeners, client ACLs, resource
+ceilings, TLS roots — remain in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -94,8 +105,7 @@ Every low-level setting is still available for the cases that need it — see
 ## What it does not do
 
 No iterative resolution. No answer synthesis of any kind — no DNS64, no synthetic CNAMEs,
-no AAAA suppression, no SVCB hint rewriting. No filtering or sinkholing. No encrypted
-ingress in v1.0.0. No third-party proxy, relay or intermediary addresses in answers, under
+no AAAA suppression, no SVCB hint rewriting. No filtering or sinkholing. No encrypted ingress. No third-party proxy, relay or intermediary addresses in answers, under
 any configuration. The reasoning for each is in [`docs/adr/`](docs/adr/).
 
 ## Install
@@ -110,7 +120,7 @@ Pin a version, and stage it without starting the service:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh \
-  | sudo bash -s -- --version v1.0.0 --no-start
+  | sudo bash -s -- --version v2.0.0 --no-start
 ```
 
 The installer detects the architecture, downloads the matching tarball, verifies its
@@ -130,7 +140,7 @@ sudo /usr/local/lib/egressdns/uninstall.sh --purge
 ### From source
 
 ```sh
-tar -xzf egressdns-v1.0.0-source.tar.gz
+tar -xzf egressdns-v2.0.0-source.tar.gz
 cd egressdns
 cargo build --release --locked
 sudo ./install.sh --local-build
@@ -143,8 +153,8 @@ Requires Rust 1.88 or newer; the pinned toolchain is in `rust-toolchain.toml`.
 Do not start on port 53. Start on 1053, confirm it behaves, then move.
 
 ```sh
-egressdnsd --config config/egressdns.example.toml --check-config
-egressdnsd --config config/egressdns.example.toml --log info
+egressdnsd --config config/egressdns.toml --check-config
+egressdnsd --config config/egressdns.toml --log info
 
 dig @127.0.0.1 -p 1053 example.com A +short
 dig @::1       -p 1053 example.com AAAA +short
@@ -154,8 +164,11 @@ dig @127.0.0.1 -p 1053 dnssec-failed.org A | grep status:   # must be SERVFAIL
 `docs/OPERATIONS.md` §1–§6 covers the full path from a test instance to port 53, including
 what to do about `systemd-resolved`.
 
-**Edit `server.allow_from` before exposing the daemon.** It is default-deny: an empty list
-refuses every client, and a non-loopback listener without an ACL is rejected at startup.
+**Exposing the daemon beyond this machine requires naming the client networks.** With
+loopback listeners and no `allow_from`, loopback is admitted automatically. With a
+non-loopback listener and no `allow_from`, startup is refused rather than guessing — the
+guess would be an open resolver. An explicitly empty list is a deliberate deny-all and is
+respected as written.
 
 ## Operating it
 

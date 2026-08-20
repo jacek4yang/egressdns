@@ -157,6 +157,21 @@ impl Config {
             redacted.cloudflare.official.api_token_file = Some(PathBuf::from("<redacted>"));
         }
         redacted.cloudflare.official.api_token_env = None;
+        // `proxies` is echoed back verbatim, so a userinfo component would put the
+        // password in `--dump-config`, in the admin socket's effective-config response
+        // and in any support bundle built from either.
+        for entry in &mut redacted.proxies {
+            if let Ok(parsed) = proxy::parse(entry) {
+                if parsed.credentials.is_some() {
+                    *entry = format!(
+                        "{}://<redacted>@{}:{}",
+                        parsed.kind.label(),
+                        parsed.host,
+                        parsed.port
+                    );
+                }
+            }
+        }
         toml::to_string_pretty(&redacted)
             .unwrap_or_else(|e| format!("# failed to render configuration: {e}\n"))
     }

@@ -818,7 +818,8 @@ path = "{}/state.sqlite3"
 "#,
             self.dir.path().display()
         );
-        let text = format!("{preamble}\n{fragment}\n");
+        // Fragment first: top-level keys must precede every table, matching `start_tuned`.
+        let text = format!("{fragment}\n{preamble}\n");
         std::fs::write(&self.config_path, &text).expect("write config");
         text
     }

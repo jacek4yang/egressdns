@@ -43,8 +43,11 @@ KNOWN_NON_FIELDS: set[str] = set()
 # brace sits at column zero, so the non-greedy body match cannot escape the struct.
 STRUCT_RE = re.compile(r"\npub struct (\w+)\s*\{(.*?)\n\}", re.DOTALL)
 # One field line: `pub name: Type,`. Types in src/config/mod.rs never contain a comma,
-# so capturing up to the trailing comma is exact.
-FIELD_RE = re.compile(r"\n    pub (\w+):\s*(.+),")
+# so capturing up to the trailing comma is exact. A field carrying `#[serde(skip)]` on
+# the preceding line is *derived* rather than configured — it never appears in a file and
+# must not be documented as though an operator could write it.
+FIELD_RE = re.compile(r"\n    (?!#\[serde\(skip\)\])pub (\w+):\s*(.+),")
+SKIPPED_FIELD_RE = re.compile(r"#\[serde\(skip\)\]\s*\n\s*(?:///[^\n]*\n\s*)*pub (\w+):")
 # `### \`[server.udp]\`` or `### \`[[upstream.groups]]\`` — brackets are stripped, so an
 # array-of-tables heading denotes the element path.
 HEADING_RE = re.compile(r"^### `\[{1,2}([^\]]+?)\]{1,2}`")
@@ -77,9 +80,12 @@ def config_paths(src: str) -> set[str]:
     """
     structs: dict[str, list[tuple[str, str]]] = {}
     for match in STRUCT_RE.finditer(src):
+        body = match.group(2)
+        skipped = set(SKIPPED_FIELD_RE.findall(body))
         structs[match.group(1)] = [
             (name, inner_type(type_text))
-            for name, type_text in FIELD_RE.findall(match.group(2))
+            for name, type_text in FIELD_RE.findall(body)
+            if name not in skipped
         ]
     if "Config" not in structs:
         sys.exit("src/config/mod.rs: could not find the root `pub struct Config` block")

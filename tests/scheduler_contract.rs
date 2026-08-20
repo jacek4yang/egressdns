@@ -21,38 +21,16 @@ use common::{a, Behaviour, Daemon, MockUpstream, TestCa, Transports};
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
-/// Build a group of plain-UDP servers in a fixed order with hedging and exploration
-/// disabled, so ranking is deterministic: ties break on configuration order.
-fn ordered_udp_group(addrs: &[std::net::SocketAddr], scheduler_extra: &str) -> String {
-    let servers: String = addrs
-        .iter()
-        .enumerate()
-        .map(|(i, addr)| {
-            format!(
-                r#"
-[[upstream.groups.servers]]
-name = "u{i}"
-transport = "udp"
-addresses = ["{ip}"]
-port = {port}
-enable_cookies = false
-"#,
-                ip = addr.ip(),
-                port = addr.port()
-            )
-        })
-        .collect();
+/// A group of plain-UDP upstreams in a fixed order.
+///
+/// Ranking is deterministic here because exploration is pinned off in `deterministic`
+/// below: with no measurements every route ties, and ties break on configuration order.
+fn udp_group(addrs: &[std::net::SocketAddr]) -> String {
+    let list: Vec<String> = addrs.iter().map(|a| format!("\"{a}\"")).collect();
     format!(
         r#"
-[[upstream.groups]]
-name = "default"
-{servers}
-[upstream.groups.scheduler]
-query_timeout = "2s"
-explore_rate = 0.0
-emergency_fanout = true
-emergency_fanout_max = 3
-{scheduler_extra}
+upstreams = [{}]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -62,8 +40,31 @@ enabled = false
 
 [prefetch]
 enabled = false
-"#
+"#,
+        list.join(", ")
     )
+}
+
+/// Pin the scheduler policy a contract test depends on.
+///
+/// These are not configuration any more — hedging, exploration and fan-out are decided
+/// from measurement, not preference — so a test that needs a specific policy reaches the
+/// internal structures rather than writing a file users could copy.
+fn deterministic(
+    hedge_enabled: bool,
+    hedge_max_fraction: f64,
+) -> impl FnOnce(&mut egressdns::config::Config) {
+    move |config: &mut egressdns::config::Config| {
+        for group in &mut config.upstream.groups {
+            let s = &mut group.scheduler;
+            s.hedge_enabled = hedge_enabled;
+            s.hedge_max_fraction = hedge_max_fraction;
+            s.explore_rate = 0.0;
+            s.emergency_fanout = true;
+            s.emergency_fanout_max = 3;
+            s.query_timeout = std::time::Duration::from_secs(2);
+        }
+    }
 }
 
 /// Start a mock that always fails, and one that always answers.
@@ -110,7 +111,7 @@ async fn failing_and_answering(
 async fn hedge_disabled_does_not_skip_the_second_route() {
     let (_bad, good, _ca, addrs) =
         failing_and_answering("nohedge.example.test.", "203.0.113.7").await;
-    let daemon = Daemon::start(&ordered_udp_group(&addrs, "hedge_enabled = false")).await;
+    let daemon = Daemon::start_tuned(&udp_group(&addrs), deterministic(false, 0.0)).await;
 
     let response = daemon
         .query_udp(&common::query(
@@ -141,11 +142,8 @@ async fn hedge_disabled_does_not_skip_the_second_route() {
 async fn hedge_budget_denial_does_not_skip_the_second_route() {
     let (_bad, good, _ca, addrs) =
         failing_and_answering("nobudget.example.test.", "203.0.113.8").await;
-    let daemon = Daemon::start(&ordered_udp_group(
-        &addrs,
-        "hedge_enabled = true\nhedge_max_fraction = 0.0",
-    ))
-    .await;
+    // Hedging is on but its budget denies it, so only the primary is ever started.
+    let daemon = Daemon::start_tuned(&udp_group(&addrs), deterministic(true, 0.0)).await;
 
     let response = daemon
         .query_udp(&common::query(
@@ -194,7 +192,7 @@ async fn three_route_fallback_attempts_every_untried_route() {
     std::mem::forget(s2);
     std::mem::forget(s3);
 
-    let daemon = Daemon::start(&ordered_udp_group(&addrs, "hedge_enabled = false")).await;
+    let daemon = Daemon::start_tuned(&udp_group(&addrs), deterministic(false, 0.0)).await;
     let response = daemon
         .query_udp(&common::query("three.example.test.", RecordType::A, false))
         .await;
@@ -294,27 +292,8 @@ async fn truncation_retry_cannot_exceed_the_foreground_deadline() {
     // Two hanging stream candidates at a 2s attempt timeout overrun it by ~1.5s.
     let fragment = format!(
         r#"
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "trunc"
-transport = "udp"
-addresses = ["127.0.0.1"]
-port = {port}
-enable_cookies = false
-
-[[upstream.groups.servers]]
-name = "hang"
-transport = "tcp"
-addresses = ["127.0.0.1"]
-port = {second_port}
-enable_cookies = false
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-explore_rate = 0.0
-query_timeout = "2s"
+upstreams = ["127.0.0.1:{port}", "tcp://127.0.0.1:{second_port}"]
+proxies = []
 
 [dnssec]
 mode = "off"
@@ -327,7 +306,7 @@ enabled = false
 "#
     );
 
-    let daemon = Daemon::start(&fragment).await;
+    let daemon = Daemon::start_tuned(&fragment, deterministic(false, 0.0)).await;
     let started = std::time::Instant::now();
     let response = daemon
         .query_udp(&common::query("big.example.test.", RecordType::A, false))

@@ -853,6 +853,9 @@ mod tests {
         let port = free_port();
         let text = format!(
             r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = ["127.0.0.1:{port}"]
@@ -864,13 +867,6 @@ enabled = false
 [admin]
 enabled = false
 
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "up"
-transport = "udp"
-addresses = ["9.9.9.9"]
 {extra}
 "#
         );
@@ -907,6 +903,9 @@ addresses = ["9.9.9.9"]
         let port = free_port();
         let text = format!(
             r#"
+upstreams = ["127.0.0.1:{port}"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = ["127.0.0.1:{port}"]
@@ -917,15 +916,6 @@ enabled = false
 
 [admin]
 enabled = false
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "self"
-transport = "udp"
-addresses = ["127.0.0.1"]
-port = {port}
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
@@ -942,6 +932,9 @@ port = {port}
         let port = free_port();
         let text = format!(
             r#"
+upstreams = ["127.0.0.53"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = ["127.0.0.1:{port}"]
@@ -952,14 +945,6 @@ enabled = false
 
 [admin]
 enabled = false
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "stub"
-transport = "udp"
-addresses = ["127.0.0.53"]
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
@@ -974,6 +959,9 @@ addresses = ["127.0.0.53"]
         let port = free_port();
         let text = format!(
             r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = ["127.0.0.1:{port}"]
@@ -984,14 +972,6 @@ enabled = false
 
 [admin]
 enabled = false
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "up"
-transport = "udp"
-addresses = ["9.9.9.9"]
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
@@ -1006,6 +986,9 @@ addresses = ["9.9.9.9"]
         let port = free_port();
         let text = format!(
             r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = ["127.0.0.1:{port}"]
@@ -1016,14 +999,6 @@ enabled = false
 
 [admin]
 enabled = false
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "up"
-transport = "udp"
-addresses = ["9.9.9.9"]
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
@@ -1039,6 +1014,9 @@ addresses = ["9.9.9.9"]
         let port = socket.local_addr().expect("addr").port();
         let text = format!(
             r#"
+upstreams = ["9.9.9.9"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:{port}"]
 tcp_listen = []
@@ -1049,14 +1027,6 @@ enabled = false
 
 [admin]
 enabled = false
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "up"
-transport = "udp"
-addresses = ["9.9.9.9"]
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
