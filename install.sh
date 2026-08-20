@@ -184,8 +184,32 @@ make_dirs() {
     fi
 }
 
+# Download with retries that cover the failures that actually happen.
+#
+# `curl --retry` alone does not retry a connection reset or an HTTP/2 PROTOCOL_ERROR —
+# it covers transient *HTTP* statuses and timeouts. Those were exactly the failures seen
+# against the GitHub CDN, and they aborted an install that a second attempt completed.
+# `--retry-all-errors` covers them; the HTTP/1.1 fallback covers a middlebox that mangles
+# HTTP/2, which no number of retries would fix.
+fetch() {
+    local url="$1" dest="$2"
+    if curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+        --connect-timeout 20 --max-time 300 -o "$dest" "$url"; then
+        return 0
+    fi
+    warn "download failed over HTTP/2; retrying with HTTP/1.1"
+    curl -fsSL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors \
+        --connect-timeout 20 --max-time 300 -o "$dest" "$url"
+}
+
 backup_existing() {
     BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/egressdns-backup.XXXXXX")"
+    # Recorded before anything is replaced, so rollback can tell "restore the previous
+    # version" from "there was no previous version".
+    HAD_PREVIOUS=0
+    if [ -f "$(path "$BIN_DIR")/$DAEMON" ]; then
+        HAD_PREVIOUS=1
+    fi
     for binary in "$DAEMON" "$CONTROL"; do
         if [ -f "$(path "$BIN_DIR")/$binary" ]; then
             cp -p "$(path "$BIN_DIR")/$binary" "$BACKUP_DIR/$binary"
@@ -236,6 +260,7 @@ rollback() {
         # assuming. If the previous version does not come back, say so plainly: an
         # operator who believes a rollback worked will not go looking.
         local recovered=0
+        local had_previous="${HAD_PREVIOUS:-0}"
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             if systemctl is-active --quiet egressdns.service; then
                 recovered=1
@@ -245,6 +270,11 @@ rollback() {
         done
         if [ "$recovered" -eq 1 ]; then
             log "rolled back; the previous version is running again"
+        elif [ "$had_previous" -eq 0 ]; then
+            # Nothing was installed before this attempt, so there is nothing to restore
+            # and nothing is running. Saying "the previous version did not start" here
+            # would send an operator looking for a version that never existed.
+            log "nothing was installed before this attempt; the host is as it was"
         else
             warn "ROLLBACK INCOMPLETE: the previous version did not start."
             warn "The previous binary, unit and configuration have been restored."
@@ -272,7 +302,8 @@ resolve_version() {
     log "resolving the latest release of $REPO"
     local api="https://api.github.com/repos/${REPO}/releases/latest"
     local body
-    body="$(curl -fsSL --retry 3 --retry-delay 2 -H 'Accept: application/vnd.github+json' "$api")" ||
+    body="$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 \
+        -H 'Accept: application/vnd.github+json' "$api")" ||
         die "cannot query the GitHub release API for $REPO"
     VERSION="$(printf '%s' "$body" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 |
                sed 's/.*"\([^"]*\)"$/\1/')"
@@ -291,10 +322,10 @@ download_release() {
     WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/egressdns-install.XXXXXX")"
 
     log "downloading $asset"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$WORK_DIR/$asset" "$base/$asset" ||
+    fetch "$base/$asset" "$WORK_DIR/$asset" ||
         die "cannot download $base/$asset"
     log "downloading SHA256SUMS"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$WORK_DIR/SHA256SUMS" "$base/SHA256SUMS" ||
+    fetch "$base/SHA256SUMS" "$WORK_DIR/SHA256SUMS" ||
         die "cannot download $base/SHA256SUMS"
 
     log "verifying SHA-256"

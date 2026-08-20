@@ -220,3 +220,41 @@ async fn an_https_record_makes_a_name_eligible_for_service_evidence() {
         "an HTTPS record must make the name eligible"
     );
 }
+
+/// Nothing shipped to an operator may describe the removed configuration format.
+///
+/// A stale sentence in a packaged document is worse than a stale sentence in the
+/// repository: it arrives inside the release, is read at exactly the moment somebody is
+/// configuring the daemon, and describes a format that will be refused. One slipped into
+/// the v2.0.0 archive's `INSTALL.md`; this stops the next one.
+#[test]
+fn no_shipped_document_or_template_describes_the_removed_format() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Everything the release workflow copies into the archive, plus the templates.
+    let shipped = [
+        "docs/INSTALL-RELEASE.md",
+        "config/egressdns.toml",
+        "config/egressdns.lan.example.toml",
+        "README.md",
+    ];
+
+    for rel in shipped {
+        let path = root.join(rel);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{rel} must be readable: {e}"));
+        for (n, line) in text.lines().enumerate() {
+            // The migration guide is the one place the old names may appear, and it is
+            // not in this list.
+            assert!(
+                !line.contains("upstream.groups"),
+                "{rel}:{} describes the removed `upstream.groups` format: {line}",
+                n + 1
+            );
+            assert!(
+                !line.trim_start().starts_with("version = "),
+                "{rel}:{} shows a configuration version field, which does not exist: {line}",
+                n + 1
+            );
+        }
+    }
+}

@@ -35,14 +35,17 @@ sudo chown -R egressdns:egressdns /var/lib/egressdns
 
 ## Configure
 
-Two settings need attention before the first start, and the daemon will not do anything
-useful until they are right:
+The shipped `egressdns.toml` is a complete working file. It has two keys that matter:
 
-* `server.allow_from` — the networks permitted to query this resolver. The default is
-  loopback only. An open resolver is an amplification weapon; do not widen this to
-  `0.0.0.0/0`.
-* `upstream.groups` — where queries are forwarded. The shipped template lists public
-  resolvers as an example, not as a recommendation.
+* `upstreams` — where queries are forwarded, as addresses or URIs. The shipped list names
+  public resolvers as an example, not as a recommendation.
+* `proxies` — egress proxies, tried when the direct path is unhealthy. Empty by default.
+
+Listeners default to loopback, so the resolver serves this machine and nothing else until
+you say otherwise. Serving a LAN means adding a `[server]` table with non-loopback
+listeners *and* an explicit `allow_from`: with one and not the other, startup is refused
+rather than guessing, because the guess would be an open resolver. See
+`egressdns.lan.example.toml`.
 
 Then validate the file before asking systemd to start anything. A configuration error at
 this point is a message on your terminal; the same error at start time is a failed unit:
