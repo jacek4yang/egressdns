@@ -90,7 +90,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         .build()
         .context("building the async runtime")?;
 
-    runtime.block_on(async move { serve(cli, Arc::new(config)).await })
+    runtime.block_on(async move {
+        let config = bootstrap(config).await?;
+        serve(cli, Arc::new(config)).await
+    })
 }
 
 fn init_logging(config: &Config, cli: &Cli) {
@@ -114,6 +117,53 @@ fn init_logging(config: &Config, cli: &Cli) {
             )
             .init();
     }
+}
+
+/// Give named upstreams their addresses, and refuse a configuration that would make the
+/// resolver wait on itself.
+///
+/// Runs before the app is assembled, so the routes exist by the time the listeners bind.
+/// It is bounded: a name that cannot be resolved right now leaves its upstream without
+/// addresses and is logged, because a resolver with three upstreams and one unreachable
+/// name should serve from the other two rather than refuse to start.
+async fn bootstrap(config: Config) -> Result<Config> {
+    use egressdns::upstream::bootstrap as boot;
+
+    let cycles = boot::detect_cycles(&config);
+    if !cycles.is_empty() {
+        // Refused before any I/O. A resolver configured to bootstrap through itself
+        // would otherwise hang at startup with nothing in the log to explain it.
+        for cycle in &cycles {
+            tracing::error!(event = "bootstrap.cycle", path = %cycle);
+        }
+        anyhow::bail!(
+            "the upstream configuration depends on this resolver: {}",
+            cycles
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+
+    let mut config = config;
+    let report = boot::resolve_pending(&mut config).await;
+    for (host, addrs) in &report.resolved {
+        tracing::info!(
+            event = "bootstrap.resolved",
+            host = %host,
+            addresses = addrs.len(),
+        );
+    }
+    for (host, reason) in &report.failed {
+        tracing::warn!(
+            event = "bootstrap.failed",
+            host = %host,
+            reason = %reason,
+            "this upstream is unusable until its name resolves",
+        );
+    }
+    Ok(config)
 }
 
 async fn serve(cli: Cli, config: Arc<Config>) -> Result<ExitCode> {

@@ -849,11 +849,32 @@ mod tests {
         panic!("no port free on both UDP and TCP");
     }
 
+    /// A UDP responder that answers any query, so the reachability probe is deterministic
+    /// rather than dependent on this machine having Internet access.
+    fn local_responder() -> u16 {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+                if n >= 12 {
+                    let mut reply = buf[..n].to_vec();
+                    // Set QR so it reads as a response; the probe only checks the
+                    // transaction id echo.
+                    reply[2] |= 0x80;
+                    let _ = socket.send_to(&reply, peer);
+                }
+            }
+        });
+        port
+    }
+
     fn base_config(extra: &str) -> Config {
+        let upstream_port = local_responder();
         let port = free_port();
         let text = format!(
             r#"
-upstreams = ["9.9.9.9"]
+upstreams = ["127.0.0.1:{upstream_port}"]
 proxies = []
 
 [server]
