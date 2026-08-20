@@ -250,7 +250,7 @@ impl App {
             config.network.relearn_window,
         ));
         let acl = Arc::new(Acl::new(
-            config.server.allow_from.clone(),
+            config.effective_allow_from(),
             config.server.deny_from.clone(),
         ));
         let limiter = Arc::new(InboundLimiter::new(&config.server.rate_limit));

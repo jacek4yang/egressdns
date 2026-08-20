@@ -42,6 +42,8 @@ pub struct Endpoint {
     pub port: u16,
     /// DoH path, for the HTTP transports only.
     pub path: Option<String>,
+    /// Bootstrap addresses pinned with `?addr=`, if any.
+    pub hints: Vec<IpAddr>,
 }
 
 /// Bootstrap metadata for a well-known resolver.
@@ -156,6 +158,7 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
                 EndpointHost::Name(p.name.to_string()),
                 443,
                 p.doh_path,
+                Vec::new(),
             ));
         }
         return Err(format!(
@@ -167,6 +170,31 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
     }
 
     let url = Url::parse(entry).map_err(|e| format!("`{entry}` is not a valid URI: {e}"))?;
+
+    // `?addr=` pins bootstrap addresses for a name DNS cannot resolve yet: a resolver on
+    // a private network, one named by a certificate that does not match its address, or
+    // one being stood up before its own record exists. It is the same information SVCB
+    // carries as ipv4hint/ipv6hint, and it changes only which socket is opened — the TLS
+    // identity is still the hostname, so a wrong hint fails closed rather than silently
+    // reaching somebody else.
+    let mut hints: Vec<IpAddr> = Vec::new();
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "addr" => {
+                let addr = value.parse::<IpAddr>().map_err(|_| {
+                    format!("`{entry}` has an `addr` hint that is not an IP address: `{value}`")
+                })?;
+                hints.push(addr);
+            }
+            other => {
+                return Err(format!(
+                    "`{entry}` has the unsupported query parameter `{other}`; only `addr` \
+                     is understood"
+                ))
+            }
+        }
+    }
+
     let host_str = url
         .host_str()
         .ok_or_else(|| format!("`{entry}` has no host"))?;
@@ -186,31 +214,35 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
                     .unwrap_or_else(|| String::from("/dns-query")),
                 p => p.to_string(),
             };
-            Ok(doh_candidates(host, url.port().unwrap_or(443), &path))
+            Ok(doh_candidates(host, url.port().unwrap_or(443), &path, hints))
         }
         "tls" => Ok(vec![Endpoint {
             transport: TransportKind::Dot,
             host,
             port: url.port().unwrap_or(853),
             path: None,
+            hints,
         }]),
         "quic" => Ok(vec![Endpoint {
             transport: TransportKind::Doq,
             host,
             port: url.port().unwrap_or(853),
             path: None,
+            hints,
         }]),
         "udp" | "dns" => Ok(vec![Endpoint {
             transport: TransportKind::Udp,
             host,
             port: url.port().unwrap_or(53),
             path: None,
+            hints,
         }]),
         "tcp" => Ok(vec![Endpoint {
             transport: TransportKind::Tcp,
             host,
             port: url.port().unwrap_or(53),
             path: None,
+            hints,
         }]),
         // `http://` is deliberately refused: an unauthenticated DoH endpoint has the
         // privacy cost of DoH and none of its integrity, which is strictly worse than
@@ -227,19 +259,26 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
 }
 
 /// One DoH endpoint becomes an HTTP/3 candidate and an HTTP/2 candidate.
-fn doh_candidates(host: EndpointHost, port: u16, path: &str) -> Vec<Endpoint> {
+fn doh_candidates(
+    host: EndpointHost,
+    port: u16,
+    path: &str,
+    hints: Vec<IpAddr>,
+) -> Vec<Endpoint> {
     vec![
         Endpoint {
             transport: TransportKind::Doh3,
             host: host.clone(),
             port,
             path: Some(path.to_string()),
+            hints: hints.clone(),
         },
         Endpoint {
             transport: TransportKind::Doh2,
             host,
             port,
             path: Some(path.to_string()),
+            hints,
         },
     ]
 }
@@ -256,6 +295,7 @@ fn parse_bare(entry: &str) -> Result<Option<Endpoint>, String> {
             host: EndpointHost::Addr(addr),
             port: 53,
             path: None,
+            hints: Vec::new(),
         }));
     }
     if let Ok(sock) = SocketAddr::from_str(entry) {
@@ -264,6 +304,7 @@ fn parse_bare(entry: &str) -> Result<Option<Endpoint>, String> {
             host: EndpointHost::Addr(sock.ip()),
             port: sock.port(),
             path: None,
+            hints: Vec::new(),
         }));
     }
     // `1.2.3.4:53` parses as a `SocketAddr` above; a bracketed v6 form without a port
@@ -275,13 +316,32 @@ fn parse_bare(entry: &str) -> Result<Option<Endpoint>, String> {
                 host: EndpointHost::Addr(addr),
                 port: 53,
                 path: None,
+                hints: Vec::new(),
             }));
         }
     }
     Ok(None)
 }
 
-/// Turn the v2 `upstreams` list into the server definitions the resolver runs on.
+/// Turn the `upstreams` list into the normalised tree the scheduler runs on.
+///
+/// This is the only way an `UpstreamConfig` is ever produced from a file: the tree is not
+/// a configuration surface, so there is exactly one path into it and one shape it can
+/// take.
+pub fn build_upstreams(upstreams: &[String]) -> Result<crate::config::UpstreamConfig, String> {
+    let servers = desugar(upstreams)?;
+    Ok(crate::config::UpstreamConfig {
+        default_group: String::from("default"),
+        groups: vec![crate::config::UpstreamGroupConfig {
+            name: String::from("default"),
+            servers,
+            scheduler: crate::config::SchedulerConfig::default(),
+        }],
+        tls: crate::config::UpstreamTlsConfig::default(),
+    })
+}
+
+/// Turn the `upstreams` list into server definitions.
 ///
 /// Each entry keeps its position in the generated name so that metrics, logs and
 /// `egressdnsctl upstreams` point back at the line the operator wrote.
@@ -304,14 +364,16 @@ pub fn desugar(upstreams: &[String]) -> Result<Vec<UpstreamServerConfig>, String
                     (vec![*addr], None)
                 }
                 EndpointHost::Name(name) => {
-                    let addresses = bootstrap_addresses(name).ok_or_else(|| {
-                        format!(
-                            "`{entry}` names `{name}`, which is not in the provider \
-                             registry, so there is no way to reach it before DNS works. \
-                             Use a known provider, or declare the server in the advanced \
-                             `[[upstream.groups.servers]]` form with explicit `addresses`"
-                        )
-                    })?;
+                    // A name the registry knows starts with published bootstrap
+                    // addresses. Any other name starts with none and is resolved at
+                    // startup by `bootstrap`. Either way the TLS identity is `name`, so
+                    // a bootstrap address only decides who we open a socket to, never
+                    // who we are willing to trust once it answers.
+                    let addresses = if candidate.hints.is_empty() {
+                        bootstrap_addresses(name).unwrap_or_default()
+                    } else {
+                        candidate.hints.clone()
+                    };
                     (addresses, Some(name.clone()))
                 }
             };
@@ -454,11 +516,27 @@ mod tests {
         assert!(e.contains("no identity to authenticate"), "{e}");
     }
 
+    /// An arbitrary named endpoint is accepted and left for the bootstrap resolver.
+    ///
+    /// Requiring membership of a built-in provider registry meant a private or
+    /// self-hosted resolver could not be named at all, which is not a resolver anyone
+    /// would ship.
     #[test]
-    fn an_unknown_name_is_refused_with_actionable_advice() {
-        let e = desugar(&[String::from("tls://dns.example.net")]).expect_err("must be refused");
-        assert!(e.contains("provider registry"), "{e}");
-        assert!(e.contains("addresses"), "{e}");
+    fn an_arbitrary_named_endpoint_is_accepted_without_bootstrap_addresses() {
+        let servers = desugar(&[String::from("tls://dns.example.net")]).expect("accepted");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].server_name.as_deref(), Some("dns.example.net"));
+        assert!(
+            servers[0].addresses.is_empty(),
+            "an unknown name carries no bootstrap addresses; startup resolves it"
+        );
+    }
+
+    /// A registry name still starts with published addresses, so it works with no DNS.
+    #[test]
+    fn a_known_provider_still_carries_bootstrap_addresses() {
+        let servers = desugar(&[String::from("tls://dns.quad9.net")]).expect("accepted");
+        assert_eq!(servers[0].addresses.len(), 4);
     }
 
     #[test]

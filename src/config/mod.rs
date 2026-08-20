@@ -7,6 +7,7 @@
 
 mod defaults;
 pub mod endpoint;
+pub mod proxy;
 pub mod reload;
 mod validate;
 
@@ -30,23 +31,21 @@ use defaults as d;
 #[serde(deny_unknown_fields, default)]
 #[derive(Default)]
 pub struct Config {
-    /// Configuration format version.
+    /// Where to ask.
     ///
-    /// `2` selects the intent-oriented front-end: `upstreams` describes where to ask and
-    /// the daemon derives transports, families and route candidates. Omitting it selects
-    /// the advanced form, where every upstream is declared in full under
-    /// `[[upstream.groups]]`. The two are mutually exclusive by design — a file that
-    /// says both would leave an operator guessing which one is in force.
-    pub version: Option<u32>,
-    /// Where to ask, in the v2 endpoint URI form. Requires `version = 2`.
+    /// Each entry is a bare address (`1.1.1.1`, `1.1.1.1:5353`,
+    /// `2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a provider alias
+    /// (`cloudflare`), or a URI (`https://dns.example.net/dns-query`,
+    /// `tls://dns.example.net`, `quic://dns.example.net`).
     ///
-    /// Accepts a bare address (`1.1.1.1`, `[2606:4700:4700::1111]:5353`), a provider
-    /// alias (`cloudflare`), or a URI (`https://dns.quad9.net/dns-query`,
-    /// `tls://dns.quad9.net`, `quic://dns.adguard-dns.com`).
+    /// How to ask is not configurable, because it is not a preference: transport,
+    /// HTTP version, address family, direct or proxy path, and which endpoint to
+    /// prefer are all decided from measurement.
     pub upstreams: Vec<String>,
-    /// Egress proxies, reserved. Declaring one is refused rather than ignored, because a
-    /// proxy that is accepted and not used sends traffic the operator believes is
-    /// tunnelled straight out of the host.
+    /// Egress proxies, tried when the direct path is unhealthy.
+    ///
+    /// `socks5://`, `socks5h://`, `http://` and `https://`. Which proxy is used, and
+    /// whether one is used at all, is decided from measured path health.
     pub proxies: Vec<String>,
     /// Inbound DNS service settings.
     pub server: ServerConfig,
@@ -60,7 +59,21 @@ pub struct Config {
     pub serve_stale: ServeStaleConfig,
     /// Hot-name prefetching.
     pub prefetch: PrefetchConfig,
-    /// Upstream groups and transports.
+    /// TLS trust for encrypted upstreams and proxies.
+    ///
+    /// Operational rather than adaptive: which roots to trust is a deployment fact, not
+    /// something the resolver can measure its way to.
+    pub tls: UpstreamTlsConfig,
+    /// Parsed egress proxies, derived from [`Config::proxies`].
+    ///
+    /// Never deserialized, for the same reason as [`Config::upstream`].
+    #[serde(skip)]
+    pub proxy: Vec<proxy::ProxyEndpoint>,
+    /// Normalised upstream routes, derived from [`Config::upstreams`].
+    ///
+    /// Never deserialized: this is the internal shape the scheduler runs on, not a
+    /// configuration surface. Declaring it in a file is refused by name.
+    #[serde(skip)]
     pub upstream: UpstreamConfig,
     /// DNSSEC policy.
     pub dnssec: DnssecConfig,
@@ -100,83 +113,41 @@ impl Config {
 
     /// Parse and validate configuration from a TOML string.
     pub fn from_toml(text: &str, path: &str) -> Result<Self, ConfigError> {
+        // Legacy syntax is detected on the raw document, before serde sees it. Left to
+        // `deny_unknown_fields`, `[[upstream.groups]]` would produce "unknown field
+        // `upstream`", which tells an operator holding a v1 file nothing about what to
+        // do. There is no translation path: the old format is refused, by name, with a
+        // pointer to the migration guide.
+        let raw: toml::Value = toml::from_str(text).map_err(|source| ConfigError::Toml {
+            path: path.to_string(),
+            source,
+        })?;
+        reject_legacy(&raw)?;
+
         let mut cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Toml {
             path: path.to_string(),
             source,
         })?;
-        cfg.apply_v2_front_end()?;
+        cfg.upstream = endpoint::build_upstreams(&cfg.upstreams)
+            .map_err(|detail| ConfigError::invalid("upstreams", detail))?;
+        // The derived tree carries the trust settings so every existing consumer keeps
+        // reading them from one place.
+        cfg.upstream.tls = cfg.tls.clone();
+        cfg.proxy = proxy::parse_all(&cfg.proxies)
+            .map_err(|detail| ConfigError::invalid("proxies", detail))?;
         validate(&cfg)?;
         Ok(cfg)
     }
 
-    /// Expand the v2 endpoint list into the server definitions the resolver runs on.
+    /// The client networks the ACL should admit.
     ///
-    /// Runs before validation so that everything downstream — validation, the reload
-    /// contract, the effective-configuration dump, `doctor` — sees one representation and
-    /// cannot disagree with itself about what is configured.
-    fn apply_v2_front_end(&mut self) -> Result<(), ConfigError> {
-        match self.version {
-            None => {
-                // The advanced form. Endpoint URIs are a v2 feature, and silently
-                // ignoring them would leave the daemon talking to the default upstreams
-                // while the file says otherwise.
-                if !self.upstreams.is_empty() {
-                    return Err(ConfigError::invalid(
-                        "upstreams",
-                        "`upstreams` requires `version = 2` at the top of the file",
-                    ));
-                }
-                if !self.proxies.is_empty() {
-                    return Err(ConfigError::invalid(
-                        "proxies",
-                        "`proxies` requires `version = 2` at the top of the file",
-                    ));
-                }
-                return Ok(());
-            }
-            Some(2) => {}
-            Some(other) => {
-                return Err(ConfigError::invalid(
-                    "version",
-                    format!(
-                        "unsupported configuration version {other}; this build understands \
-                         version 2, or omit `version` for the advanced form"
-                    ),
-                ));
-            }
+    /// Resolves the three states of [`ServerConfig::allow_from`]; see that field for why
+    /// omission and explicit emptiness cannot be the same value.
+    pub fn effective_allow_from(&self) -> Vec<IpNet> {
+        match &self.server.allow_from {
+            Some(nets) => nets.clone(),
+            None => loopback_networks(),
         }
-
-        // Proxy support is not implemented. Accepting the key and doing nothing would be
-        // worse than refusing: the operator would believe egress was tunnelled.
-        if !self.proxies.is_empty() {
-            return Err(ConfigError::invalid(
-                "proxies",
-                "proxy egress is not implemented in this release; remove `proxies` or \
-                 route the daemon's egress at the network layer",
-            ));
-        }
-
-        // `upstream.groups` has a default value, so "not empty" is not the same as
-        // "declared". Comparing against the default is what distinguishes a file that
-        // wrote `[[upstream.groups]]` from one that simply did not mention it.
-        if self.upstream.groups != UpstreamConfig::default().groups {
-            return Err(ConfigError::invalid(
-                "upstream.groups",
-                "a `version = 2` file describes upstreams with the `upstreams` list; \
-                 remove `[[upstream.groups]]`, or drop `version` to use the advanced form",
-            ));
-        }
-
-        let servers = endpoint::desugar(&self.upstreams)
-            .map_err(|detail| ConfigError::invalid("upstreams", detail))?;
-
-        self.upstream.default_group = String::from("default");
-        self.upstream.groups = vec![UpstreamGroupConfig {
-            name: String::from("default"),
-            servers,
-            scheduler: SchedulerConfig::default(),
-        }];
-        Ok(())
     }
 
     /// Render the effective configuration as TOML with secrets redacted.
@@ -208,9 +179,20 @@ pub struct ServerConfig {
     pub udp_listen: Vec<SocketAddr>,
     /// TCP listen addresses.
     pub tcp_listen: Vec<SocketAddr>,
-    /// Client networks permitted to use the resolver. Default-deny: an empty list
-    /// refuses every client.
-    pub allow_from: Vec<IpNet>,
+    /// Client networks permitted to use the resolver.
+    ///
+    /// Three states, and they mean different things:
+    ///
+    /// * **Omitted.** With loopback-only listeners, `127.0.0.0/8` and `::1/128` are
+    ///   permitted automatically, so a file naming only `upstreams` is usable from the
+    ///   local host. With a non-loopback listener, omitting it is refused before
+    ///   binding rather than guessed at — that is the difference between a resolver
+    ///   for this machine and an open resolver.
+    /// * **Explicitly empty.** A deliberate deny-all. Respected as written.
+    /// * **Explicitly populated.** Exactly those networks, and nothing else.
+    ///
+    /// [`Self::effective_allow_from`] resolves the three into the list the ACL uses.
+    pub allow_from: Option<Vec<IpNet>>,
     /// Client networks explicitly refused, evaluated before `allow_from`.
     pub deny_from: Vec<IpNet>,
     /// Maximum time the foreground path may spend before returning something to the
@@ -236,7 +218,7 @@ impl Default for ServerConfig {
         Self {
             udp_listen: d::default_listen(),
             tcp_listen: d::default_listen(),
-            allow_from: Vec::new(),
+            allow_from: None,
             deny_from: Vec::new(),
             foreground_budget: Duration::from_millis(2_500),
             any_policy: AnyPolicy::Minimal,
@@ -737,6 +719,50 @@ impl TransportKind {
             Self::Doh2 | Self::Doh3 => 443,
         }
     }
+}
+
+/// The loopback networks admitted when no ACL is written.
+pub fn loopback_networks() -> Vec<IpNet> {
+    // Both are compile-time constants in disguise; `expect` is not available on a
+    // production path, so a parse failure degrades to an empty list, which is
+    // deny-all — the safe direction.
+    ["127.0.0.0/8", "::1/128"]
+        .iter()
+        .filter_map(|n| n.parse::<IpNet>().ok())
+        .collect()
+}
+
+/// Keys that belonged to the pre-2.0 configuration and are now refused.
+///
+/// Each carries the reason and the replacement, because "unknown field" is a useless
+/// thing to tell somebody holding a file that used to work.
+const LEGACY_KEYS: &[(&str, &str)] = &[
+    (
+        "version",
+        "EgressDNS 2.0 has no configuration version field. Delete the line; the format \
+         is identified by its contents",
+    ),
+    (
+        "upstream",
+        "the `[[upstream.groups]]` and `[[upstream.groups.servers]]` tables are removed. \
+         List your resolvers in `upstreams` instead, as addresses or URIs",
+    ),
+];
+
+/// Refuse a pre-2.0 document by name rather than by serde's unknown-field message.
+fn reject_legacy(raw: &toml::Value) -> Result<(), ConfigError> {
+    let Some(table) = raw.as_table() else {
+        return Ok(());
+    };
+    for (key, reason) in LEGACY_KEYS {
+        if table.contains_key(*key) {
+            return Err(ConfigError::invalid(
+                *key,
+                format!("{reason}. See docs/MIGRATION-V1-TO-V2.md"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A single upstream server definition.

@@ -503,7 +503,8 @@ fn expand_wildcard(addr: SocketAddr) -> Vec<SocketAddr> {
 
 /// Check that the ACL admits somebody, and that it does not admit everybody by accident.
 fn check_acl(config: &Config) -> Check {
-    let allow = &config.server.allow_from;
+    let allow = config.effective_allow_from();
+    let allow = &allow;
     if allow.is_empty() {
         return Check::new(
             "acl.coverage",

@@ -479,7 +479,7 @@ mod tests {
         new.cloudflare.mode = crate::config::CloudflareMode::Off;
         new.probe.enabled = !old.probe.enabled;
         new.prefetch.enabled = !old.prefetch.enabled;
-        new.server.allow_from = vec!["10.0.0.0/8".parse().expect("net")];
+        new.server.allow_from = Some(vec!["10.0.0.0/8".parse().expect("net")]);
         new.ttl.cap_default = old.ttl.cap_default / 2;
         new.dnssec.mode = crate::config::DnssecMode::Off;
         new.server.rate_limit.per_client_qps = 12_345;
