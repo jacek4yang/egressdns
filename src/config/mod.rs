@@ -928,6 +928,14 @@ pub struct DnssecConfig {
     pub max_validation_depth: usize,
     /// Attach RFC 8914 Extended DNS Errors describing DNSSEC outcomes.
     pub extended_errors: bool,
+    /// Ask a second, independent resolver before believing an unsigned NXDOMAIN.
+    ///
+    /// A forged negative is how a name is made to disappear, and unlike a forged address
+    /// it leaves no evidence in the answer itself. Corroboration can only ever replace a
+    /// negative with a positive, never the reverse, so it cannot be used to erase a name.
+    ///
+    /// Costs one extra query, on cold unsigned NXDOMAINs only.
+    pub corroborate_negative: bool,
 }
 
 impl Default for DnssecConfig {
@@ -939,6 +947,7 @@ impl Default for DnssecConfig {
             max_concurrent_validations: 256,
             validation_cache_entries: 10_000,
             max_validation_depth: 12,
+            corroborate_negative: true,
             extended_errors: true,
         }
     }

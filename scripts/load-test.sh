@@ -86,6 +86,9 @@ cargo build --release --bin egressdnsd >/dev/null
 write_config() {
     # $1 = dnssec mode
     cat > "${WORK}/egressdns.toml" <<EOF
+upstreams = ["127.0.0.1:${UPSTREAM_PORT}"]
+proxies = []
+
 [server]
 udp_listen = ["127.0.0.1:${DNS_PORT}"]
 tcp_listen = ["127.0.0.1:${DNS_PORT}"]
@@ -114,20 +117,6 @@ path = "${WORK}/state.sqlite3"
 
 [cache]
 max_memory_bytes = 268435456
-
-[[upstream.groups]]
-name = "default"
-
-[[upstream.groups.servers]]
-name = "mock-udp"
-transport = "udp"
-addresses = ["127.0.0.1"]
-port = ${UPSTREAM_PORT}
-enable_cookies = false
-
-[upstream.groups.scheduler]
-hedge_enabled = false
-query_timeout = "2s"
 
 [dnssec]
 mode = "$1"

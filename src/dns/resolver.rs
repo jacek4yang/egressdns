@@ -993,6 +993,16 @@ impl Resolver {
             return Err(ResolveError::DnssecBogus);
         }
 
+        // A negative answer nobody signed is the classic forgery: it is how censorship,
+        // captive portals and on-path injection make a name disappear, and unlike a
+        // forged address it leaves no evidence in the answer itself. So before an
+        // unsigned NXDOMAIN is trusted, a *different resolver authority* is asked. A
+        // Secure or Insecure-with-proof answer needs none of this, and neither does a
+        // positive one: this is the case where a second opinion is worth the query.
+        let (response, route) = self
+            .corroborate_negative(&group, &message, options, &response, status, route, seed)
+            .await;
+
         let kind = classify(&response);
         let raw_ttl = match kind {
             EntryKind::Positive => msgutil::min_ttl(&response).unwrap_or(0),
@@ -1056,6 +1066,109 @@ impl Resolver {
         self.cache.insert(key.clone(), Arc::clone(&entry));
         self.schedule_probes(key, &entry);
         Ok(entry)
+    }
+
+    /// Ask a second authority before believing an unsigned negative answer.
+    ///
+    /// Returns the answer to use and the route that produced it. When the second
+    /// authority agrees, or cannot be reached, or there is no independent one, the
+    /// original answer is returned unchanged — corroboration can only ever *replace a
+    /// negative with a positive*, never the reverse. That asymmetry is deliberate: an
+    /// attacker who can forge one resolver's answer should not be able to use this path
+    /// to erase a name, only to fail at hiding one.
+    #[allow(clippy::too_many_arguments)]
+    async fn corroborate_negative(
+        &self,
+        group: &Arc<crate::upstream::pool::UpstreamGroup>,
+        message: &Message,
+        options: DnsRequestOptions,
+        response: &Message,
+        status: DnssecStatus,
+        route: Option<crate::upstream::pool::RouteKey>,
+        seed: u64,
+    ) -> (Message, Option<crate::upstream::pool::RouteKey>) {
+        let original = (response.clone(), route.clone());
+
+        if !self.config.dnssec.corroborate_negative {
+            return original;
+        }
+        // Only unsigned negatives. A signed answer already proves itself, and a positive
+        // answer is not the shape this defends against.
+        if response.metadata.response_code != ResponseCode::NXDomain
+            || status == DnssecStatus::Secure
+        {
+            return original;
+        }
+        let Some(first) = route.as_ref() else {
+            return original;
+        };
+
+        // Whatever is left of the client's deadline, and never more than a small slice of
+        // it: the client is owed an answer, not a debate.
+        let remaining = crate::dns::deadline::remaining_or(self.config.server.foreground_budget);
+        let slice = remaining.mul_f64(0.5);
+        if slice.is_zero() {
+            return original;
+        }
+
+        let Some(second) = self
+            .scheduler
+            .corroborate(
+                group,
+                message.clone(),
+                options,
+                slice,
+                seed ^ 0x9E37_79B9,
+                &first.authority,
+            )
+            .await
+        else {
+            // No independent authority, or it did not answer. The original stands: an
+            // absent second opinion is not evidence either way.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "unavailable",
+            )
+            .increment(1);
+            return original;
+        };
+
+        if second.message.metadata.response_code == ResponseCode::NXDomain {
+            // Two independent resolvers agree the name does not exist.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "agreed",
+            )
+            .increment(1);
+            return original;
+        }
+
+        if second.message.metadata.response_code == ResponseCode::NoError
+            && !second.message.answers.is_empty()
+        {
+            // One resolver says the name is gone and an independent one returns records
+            // for it. The positive answer is the one that cannot be fabricated by
+            // deletion, so it wins, and the disagreement is recorded.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "negative_conflict",
+            )
+            .increment(1);
+            tracing::info!(
+                event = "corroboration.negative_conflict",
+                first = %first.authority,
+                second = %second.route.authority,
+                "an unsigned NXDOMAIN was contradicted by an independent resolver",
+            );
+            return (second.message, Some(second.route));
+        }
+
+        metrics::counter!(
+            crate::metrics::names::CORROBORATION_TOTAL,
+            "outcome" => "inconclusive",
+        )
+        .increment(1);
+        original
     }
 
     /// Offer addresses from a fresh answer to the probe engine.

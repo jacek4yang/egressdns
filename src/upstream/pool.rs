@@ -6,7 +6,7 @@
 //! randomised source port per query, which is what RFC 5452 wants.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -451,7 +451,11 @@ impl UpstreamRegistry {
 fn authority_of(server: &UpstreamServerConfig, addr: IpAddr) -> String {
     match server.server_name.as_deref() {
         Some(name) => name.trim_end_matches('.').to_ascii_lowercase(),
-        None => addr.to_string(),
+        // Address *and* port. Two resolvers can share an address and differ only by port
+        // — a co-located forwarder on 127.0.0.1:5353 beside one on 127.0.0.1:53 is two
+        // independent resolvers, and collapsing them would mean one could corroborate
+        // itself.
+        None => SocketAddr::new(addr, server.effective_port()).to_string(),
     }
 }
 

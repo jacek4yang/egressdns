@@ -491,6 +491,64 @@ impl Scheduler {
         ranked
     }
 
+    /// Ask a resolver authority other than `exclude`, for corroboration.
+    ///
+    /// Deliberately narrow: one attempt, one route, no hedge and no fallback. This exists
+    /// to obtain a *second opinion from a different resolver*, and a fan-out would either
+    /// ask the same authority again — which corroborates nothing — or spend the client's
+    /// remaining time on a question that is already answered.
+    ///
+    /// Returns `None` when no independent authority is configured or none answered in
+    /// time. That is not a failure: corroboration strengthens an answer, and its absence
+    /// leaves the answer exactly as strong as it already was.
+    pub async fn corroborate(
+        &self,
+        group: &UpstreamGroup,
+        message: Message,
+        options: DnsRequestOptions,
+        budget: Duration,
+        seed: u64,
+        exclude: &str,
+    ) -> Option<UpstreamAnswer> {
+        if budget.is_zero() {
+            return None;
+        }
+        let deadline = Instant::now() + budget;
+        let ranked = self.rank(group, seed);
+        let route = ranked
+            .into_iter()
+            .find(|r| r.key.authority.as_ref() != exclude)?;
+
+        let result = self
+            .attempt(
+                Arc::clone(&route),
+                message,
+                options,
+                deadline,
+                group.scheduler.query_timeout,
+                Duration::ZERO,
+                None,
+                // Shed rather than queue: a corroboration that has to wait for capacity
+                // is competing with the foreground work it exists to serve.
+                PermitPolicy::Shed,
+            )
+            .await;
+
+        let outcome = result.outcome?;
+        let now = Instant::now();
+        route.with_health(|h| h.record(outcome, result.latency, now, &group.scheduler));
+        if outcome != AttemptOutcome::Success {
+            return None;
+        }
+        Some(UpstreamAnswer {
+            message: result.message?,
+            route: route.key.clone(),
+            latency: result.latency.unwrap_or_default(),
+            stream_retry: false,
+            trust_ad: route.trust_ad,
+        })
+    }
+
     /// Resolve one query through a group.
     pub async fn resolve(
         &self,

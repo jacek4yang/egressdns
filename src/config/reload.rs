@@ -309,6 +309,7 @@ pub const RELOADABLE: &[&str] = &[
     "datasets.max_file_bytes",
     "datasets.max_records",
     "datasets.reload_interval",
+    "dnssec.corroborate_negative",
     "dnssec.extended_errors",
     "dnssec.max_validation_depth",
     "dnssec.mode",

@@ -65,6 +65,8 @@ pub mod names {
     /// Queries sent to a route whose address family read as unusable because no family
     /// read as usable at all — that is, because detection, not the network, failed.
     pub const UPSTREAM_FAMILY_FALLBACK_TOTAL: &str = "egressdns_upstream_family_fallback_total";
+    /// Negative answers checked against a second resolver authority, by outcome.
+    pub const CORROBORATION_TOTAL: &str = "egressdns_corroboration_total";
     /// DNSSEC validations currently in flight.
     pub const DNSSEC_INFLIGHT: &str = "egressdns_dnssec_validations_inflight";
     /// DNSSEC validations shed because the concurrency ceiling was reached.
@@ -224,6 +226,10 @@ fn describe() {
         "Queries sent to a route whose address family read as unusable because no family \
          read as usable at all"
     );
+    describe_counter!(
+        names::CORROBORATION_TOTAL,
+        "Unsigned negative answers checked against an independent resolver authority"
+    );
     describe_gauge!(names::UPSTREAM_INFLIGHT, "Upstream exchanges in flight");
     describe_gauge!(names::DNSSEC_INFLIGHT, "DNSSEC validations in flight");
     describe_counter!(
@@ -356,6 +362,7 @@ mod tests {
             names::UPSTREAM_INFLIGHT,
             names::UPSTREAM_LAST_RESORT_TOTAL,
             names::UPSTREAM_FAMILY_FALLBACK_TOTAL,
+            names::CORROBORATION_TOTAL,
             names::DNSSEC_INFLIGHT,
             names::DNSSEC_SHED_TOTAL,
             names::PROBE_WORKERS_ACTIVE,

@@ -378,6 +378,7 @@ DNSSEC validation policy.
 | `max_concurrent_validations` | integer | `256` | Global ceiling on DNSSEC validations running at once, enforced by a semaphore the resolver acquires before validating. A query that cannot get a permit inside the foreground budget is shed as SERVFAIL and counted in `dnssec_shed_total` rather than queueing without bound. **Restart-required**: the semaphore is created once at startup and shared by every resolver generation. |
 | `max_validation_depth` | integer | `12` | Maximum delegation depth followed while building a validation chain, which bounds the work one hostile zone can force. Applied as the request depth limit on every validating lookup. |
 | `validation_cache_entries` | integer | `10000` | Bound on the validation result cache. |
+| `corroborate_negative` | boolean | `true` | Ask a second, independent resolver authority before believing an unsigned NXDOMAIN. A forged negative is how a name is made to disappear and, unlike a forged address, leaves no evidence in the answer itself. Corroboration can only ever replace a negative with a positive, never the reverse, so it cannot be used to erase a name. Costs one extra query on cold unsigned NXDOMAINs only. |
 | `extended_errors` | boolean | `true` | Attach RFC 8914 Extended DNS Errors describing DNSSEC outcomes. |
 
 ### `[ecs]`
