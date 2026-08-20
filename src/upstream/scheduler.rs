@@ -549,10 +549,22 @@ impl Scheduler {
         if cfg.hedge_enabled && ranked.len() > 1 && hedge_budget.allows(cfg.hedge_max_fraction) {
             let delay = ranked[0].with_health(|h| h.hedge_delay(cfg));
             if delay < budget {
+                // Prefer a hedge that reaches a *different resolver*. A second route to
+                // the same authority hedges against a lost packet or a bad path, which is
+                // worth something; a route to a different authority hedges against that
+                // resolver being down or wrong, which is worth more. The best-ranked
+                // independent route is chosen, falling back to plain second place when
+                // every alternative belongs to the same authority.
+                let primary_authority = &ranked[0].key.authority;
+                let hedge_idx = ranked
+                    .iter()
+                    .position(|r| &r.key.authority != primary_authority)
+                    .unwrap_or(1);
+
                 // Marked only here, where the attempt future is actually admitted.
-                attempted[1] = true;
+                attempted[hedge_idx] = true;
                 pending.push(self.attempt(
-                    Arc::clone(&ranked[1]),
+                    Arc::clone(&ranked[hedge_idx]),
                     message.clone(),
                     options,
                     deadline,
@@ -1133,6 +1145,76 @@ mod tests {
             ranked[0].key, group.routes[2].key,
             "the 20ms route must beat the 400ms route"
         );
+    }
+
+    /// Four routes to one provider are one authority, not four opinions.
+    #[tokio::test]
+    async fn transport_and_path_diversity_do_not_multiply_authorities() {
+        crate::tls::install_crypto_provider();
+        let cfg = UpstreamConfig {
+            default_group: "default".into(),
+            groups: vec![UpstreamGroupConfig {
+                name: "default".into(),
+                // One logical DoH resolver, reached over two HTTP versions and two
+                // addresses: four routes.
+                servers: vec![
+                    UpstreamServerConfig {
+                        name: "doh3".into(),
+                        transport: TransportKind::Doh3,
+                        addresses: vec![
+                            "9.9.9.9".parse().expect("ip"),
+                            "149.112.112.112".parse().expect("ip"),
+                        ],
+                        server_name: Some("dns.quad9.net".into()),
+                        ..UpstreamServerConfig::default()
+                    },
+                    UpstreamServerConfig {
+                        name: "doh2".into(),
+                        transport: TransportKind::Doh2,
+                        addresses: vec![
+                            "9.9.9.9".parse().expect("ip"),
+                            "149.112.112.112".parse().expect("ip"),
+                        ],
+                        server_name: Some("dns.quad9.net".into()),
+                        ..UpstreamServerConfig::default()
+                    },
+                ],
+                scheduler: SchedulerConfig::default(),
+            }],
+            tls: UpstreamTlsConfig::default(),
+        };
+        let roots = Arc::new(crate::tls::root_store(false, &[]).expect("roots"));
+        let registry = UpstreamRegistry::build(&cfg, &[], roots, Duration::from_secs(2), 1232)
+            .expect("registry");
+        let group = registry.default_group().expect("group");
+
+        assert_eq!(group.routes.len(), 4, "four distinct routes");
+        let authorities: std::collections::BTreeSet<&str> = group
+            .routes
+            .iter()
+            .map(|r| r.key.authority.as_ref())
+            .collect();
+        assert_eq!(
+            authorities.len(),
+            1,
+            "four routes to one resolver are one authority, saw {authorities:?}"
+        );
+        assert!(authorities.contains("dns.quad9.net"));
+    }
+
+    /// Two plaintext resolvers are two authorities, because nothing in the protocol lets
+    /// us prove otherwise — even when one operator runs both.
+    #[tokio::test]
+    async fn distinct_plaintext_resolvers_are_distinct_authorities() {
+        let (registry, group) = test_group(3);
+        let _ = registry;
+        let authorities: std::collections::BTreeSet<&str> = group
+            .routes
+            .iter()
+            .filter(|r| !r.stream_companion)
+            .map(|r| r.key.authority.as_ref())
+            .collect();
+        assert_eq!(authorities.len(), 3, "{authorities:?}");
     }
 
     #[test]

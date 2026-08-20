@@ -140,7 +140,7 @@ fn listeners(config: &Config) -> Vec<(SocketAddr, &'static str)> {
 ///
 /// `config_path` is reported in permission diagnostics. When `config` failed to load the
 /// caller passes `None` and only the file-level checks run.
-pub fn run(config: &Config, config_path: &Path) -> Report {
+pub async fn run(config: &Config, config_path: &Path) -> Report {
     let mut checks = Vec::new();
 
     checks.push(check_config_readable(config_path));
@@ -151,7 +151,7 @@ pub fn run(config: &Config, config_path: &Path) -> Report {
     checks.extend(check_permissions(config, config_path));
     checks.push(check_privileged_ports(config));
     checks.push(check_address_families(config));
-    checks.extend(check_upstream_reachability(config));
+    checks.extend(check_upstream_transports(config).await);
     checks.push(check_systemd());
 
     Report { checks }
@@ -163,120 +163,138 @@ const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_50
 /// Ceiling on the addresses probed, so a large configuration cannot make `doctor` slow.
 const REACH_MAX_TARGETS: usize = 24;
 
-/// Test whether the configured upstreams can actually be reached from this host.
+/// Exercise each configured upstream as the protocol it actually is.
 ///
-/// This is the check that distinguishes "the resolver is broken" from "this network
-/// filters port 853". Both produce SERVFAIL on every query and identical logs; only an
-/// egress test tells them apart.
+/// A TCP connection to port 443 proves a socket opened. It does not prove anything there
+/// speaks DoH, that the certificate matches the configured name, or that a DNS answer
+/// comes back — and each of those is a way a deployment fails while a port probe passes.
+/// So Do53 sends a real query, DoT completes a real TLS handshake against the configured
+/// name and then a real query, and the transports whose clients are not implemented here
+/// report `NOT_TESTED` rather than being approximated.
 ///
-/// One reachable upstream is enough to resolve, so a single unreachable server is a
-/// warning and *every* server being unreachable is a failure.
-fn check_upstream_reachability(config: &Config) -> Vec<Check> {
+/// One working upstream is enough to resolve, so a single failure is a warning and every
+/// upstream failing is a failure.
+async fn check_upstream_transports(config: &Config) -> Vec<Check> {
     let mut out = Vec::new();
-    let mut reachable = 0usize;
-    let mut tested = 0usize;
-    let mut unreachable: Vec<String> = Vec::new();
+    let mut worked: Vec<String> = Vec::new();
+    let mut broke: Vec<String> = Vec::new();
     let mut untested: Vec<String> = Vec::new();
 
+    let roots =
+        match crate::tls::root_store(config.tls.use_system_roots, &config.tls.extra_ca_files) {
+            Ok(store) => std::sync::Arc::new(store),
+            Err(e) => {
+                out.push(
+                    Check::new(
+                        "upstream.transport",
+                        "Configured upstreams answer over their own protocol",
+                        Status::NotTested,
+                        format!("TLS roots could not be loaded, so no encrypted canary ran: {e}"),
+                    )
+                    .with_remedy("check tls.extra_ca_files"),
+                );
+                return out;
+            }
+        };
+
+    let mut probed = 0usize;
     'groups: for group in &config.upstream.groups {
         for server in group.servers.iter().filter(|s| s.enabled) {
             let port = server.effective_port();
             for addr in &server.addresses {
-                if tested + untested.len() >= REACH_MAX_TARGETS {
+                if probed >= REACH_MAX_TARGETS {
                     break 'groups;
                 }
+                probed += 1;
                 let sock = SocketAddr::new(*addr, port);
                 let label = format!("{} {}/{sock}", server.name, server.transport.label());
-                let result = match server.transport {
-                    crate::config::TransportKind::Udp => {
-                        probes::udp_dns_reachable(sock, REACH_TIMEOUT)
+                match probes::transport_canary(
+                    server.transport,
+                    sock,
+                    server.server_name.as_deref(),
+                    server.path.as_deref(),
+                    std::sync::Arc::clone(&roots),
+                    REACH_TIMEOUT,
+                )
+                .await
+                {
+                    Ok(detail) => worked.push(format!("{label}: {detail}")),
+                    Err(reason) if reason.starts_with("NOT_TESTED") => {
+                        untested.push(format!("{label}: {reason}"));
                     }
-                    // DoQ and DoH3 ride QUIC. A UDP probe cannot distinguish "filtered"
-                    // from "this endpoint does not answer plain DNS", so rather than
-                    // guess, they are reported as untested.
-                    crate::config::TransportKind::Doq | crate::config::TransportKind::Doh3 => {
-                        untested.push(label);
-                        continue;
-                    }
-                    _ => probes::tcp_reachable(sock, REACH_TIMEOUT),
-                };
-                tested += 1;
-                match result {
-                    Ok(()) => reachable += 1,
-                    Err(e) => unreachable.push(format!("{label}: {e}")),
+                    Err(reason) => broke.push(format!("{label}: {reason}")),
                 }
             }
         }
     }
 
-    if tested == 0 {
+    if worked.is_empty() && broke.is_empty() {
         out.push(Check::new(
-            "upstream.reachable",
-            "Configured upstreams are reachable",
+            "upstream.transport",
+            "Configured upstreams answer over their own protocol",
             Status::NotTested,
             if untested.is_empty() {
-                String::from("no upstream address could be probed")
+                String::from("no upstream could be probed")
             } else {
                 format!(
-                    "only QUIC-based upstreams are configured, which this check does \
-                     not probe: {}",
-                    untested.join(", ")
+                    "no upstream has a canary implemented here: {}",
+                    untested.join("; ")
                 )
             },
         ));
-        return out;
-    }
-
-    if reachable == 0 {
+    } else if worked.is_empty() {
         out.push(
             Check::new(
-                "upstream.reachable",
-                "Configured upstreams are reachable",
+                "upstream.transport",
+                "Configured upstreams answer over their own protocol",
                 Status::Fail,
-                format!(
-                    "none of the {tested} probed upstream endpoints answered: {}",
-                    unreachable.join("; ")
-                ),
+                format!("no upstream answered: {}", broke.join("; ")),
             )
             .with_remedy(
                 "every query will SERVFAIL. If the encrypted ports are filtered on this \
                  network, configure an upstream whose transport is permitted here",
             ),
         );
-    } else if !unreachable.is_empty() {
+    } else if !broke.is_empty() {
         out.push(
             Check::new(
-                "upstream.reachable",
-                "Configured upstreams are reachable",
+                "upstream.transport",
+                "Configured upstreams answer over their own protocol",
                 Status::Warning,
                 format!(
-                    "{reachable} of {tested} probed upstream endpoints answered; \
-                     unreachable: {}",
-                    unreachable.join("; ")
+                    "{} of {} answered; not answering: {}",
+                    worked.len(),
+                    worked.len() + broke.len(),
+                    broke.join("; ")
                 ),
             )
             .with_remedy(
-                "resolution still works through the reachable upstreams, but the dead \
-                 ones cost latency on every fallback",
+                "resolution still works through the upstreams that answered, but the \
+                 others cost latency on every fallback",
             ),
         );
     } else {
         out.push(Check::new(
-            "upstream.reachable",
-            "Configured upstreams are reachable",
+            "upstream.transport",
+            "Configured upstreams answer over their own protocol",
             Status::Pass,
-            format!("all {tested} probed upstream endpoints answered"),
+            format!(
+                "{} upstream endpoint(s) answered: {}",
+                worked.len(),
+                worked.join("; ")
+            ),
         ));
     }
 
     if !untested.is_empty() {
         out.push(Check::new(
-            "upstream.quic_untested",
-            "QUIC upstreams were not probed",
+            "upstream.transport_untested",
+            "Some transports have no canary",
             Status::NotTested,
             format!(
-                "DoQ and DoH3 endpoints are not probed by this check: {}",
-                untested.join(", ")
+                "no HTTP/2, HTTP/3 or QUIC client is implemented in doctor, so these were \
+                 not exercised: {}",
+                untested.join("; ")
             ),
         ));
     }
@@ -902,10 +920,10 @@ enabled = false
             .unwrap_or_else(|| panic!("check {id} missing from report"))
     }
 
-    #[test]
-    fn a_clean_configuration_reports_no_failure() {
+    #[tokio::test]
+    async fn a_clean_configuration_reports_no_failure() {
         let config = base_config("");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         assert!(
             !report.has_failure(),
             "unexpected failures: {:?}",
@@ -918,8 +936,8 @@ enabled = false
         assert_eq!(report.exit_code(), 0);
     }
 
-    #[test]
-    fn an_upstream_pointing_at_our_own_listener_is_a_failure() {
+    #[tokio::test]
+    async fn an_upstream_pointing_at_our_own_listener_is_a_failure() {
         // The upstream is exactly the configured listen address.
         let port = free_port();
         let text = format!(
@@ -940,7 +958,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         let c = check(&report, "loop.direct");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains(&format!("127.0.0.1:{port}")));
@@ -948,8 +966,8 @@ enabled = false
         assert_eq!(report.exit_code(), 2);
     }
 
-    #[test]
-    fn the_systemd_stub_resolver_as_an_upstream_is_a_failure() {
+    #[tokio::test]
+    async fn the_systemd_stub_resolver_as_an_upstream_is_a_failure() {
         let port = free_port();
         let text = format!(
             r#"
@@ -969,14 +987,14 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         let c = check(&report, "loop.stub");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains("127.0.0.53"));
     }
 
-    #[test]
-    fn an_empty_acl_refuses_every_client_and_fails() {
+    #[tokio::test]
+    async fn an_empty_acl_refuses_every_client_and_fails() {
         let port = free_port();
         let text = format!(
             r#"
@@ -996,13 +1014,13 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         let c = check(&report, "acl.coverage");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
     }
 
-    #[test]
-    fn an_acl_that_excludes_the_client_subnet_warns() {
+    #[tokio::test]
+    async fn an_acl_that_excludes_the_client_subnet_warns() {
         // Serves a LAN prefix but not loopback, so local health checks are refused.
         let port = free_port();
         let text = format!(
@@ -1023,14 +1041,14 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         let c = check(&report, "acl.coverage");
         assert_eq!(c.status, Status::Warning, "{}", c.detail);
     }
 
     /// A bound port must be reported as a conflict, with the address named.
-    #[test]
-    fn a_port_already_in_use_is_reported_as_a_conflict() {
+    #[tokio::test]
+    async fn a_port_already_in_use_is_reported_as_a_conflict() {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
         let port = socket.local_addr().expect("addr").port();
         let text = format!(
@@ -1051,7 +1069,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname"));
+        let report = run(&config, Path::new("/etc/hostname")).await;
         let c = check(&report, "listener.conflict");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains(&port.to_string()));

@@ -220,7 +220,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     // `doctor` is always answered locally. Its whole purpose is to run before the daemon
     // exists, against a configuration that has not been activated yet.
     if matches!(cli.command, Command::Doctor) {
-        return Ok(run_doctor(&cli));
+        return Ok(run_doctor(&cli).await);
     }
 
     if matches!(cli.command, Command::CheckConfig) && !cli.socket.exists() {
@@ -266,9 +266,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 /// A configuration that does not even parse is itself the diagnosis, so it is reported as
 /// a single failing check rather than as a CLI error: `doctor` should always produce a
 /// report, and `--json` consumers should always get one document.
-fn run_doctor(cli: &Cli) -> ExitCode {
+async fn run_doctor(cli: &Cli) -> ExitCode {
     let report = match egressdns::config::Config::load(&cli.config) {
-        Ok(config) => egressdns::doctor::run(&config, &cli.config),
+        Ok(config) => egressdns::doctor::run(&config, &cli.config).await,
         Err(e) => egressdns::doctor::Report {
             checks: vec![egressdns::doctor::Check {
                 id: "config.valid",

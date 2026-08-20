@@ -41,8 +41,20 @@ pub struct RouteKey {
     ///
     /// Part of the identity because a direct route and a proxied route to the same
     /// server are different paths with different failure modes, and each must carry its
-    /// own health. They are *not* different authorities: see `upstream::egress`.
+    /// own health. They are *not* different authorities: see [`RouteKey::authority`].
     pub path: Arc<str>,
+    /// Which resolver is actually answering.
+    ///
+    /// Cloudflare over DoH/3, Cloudflare over DoH/2, Cloudflare over IPv6 and Cloudflare
+    /// through a proxy are four routes and **one** authority. Counting them as four
+    /// independent opinions would let one operator's outage, or one operator's forged
+    /// answer, look like a consensus.
+    ///
+    /// Derived conservatively: an encrypted endpoint is identified by the name its
+    /// certificate must carry, and a plaintext one by its address, because that is all we
+    /// can prove about it. When two things might be the same authority, they are treated
+    /// as the same one — under-counting independence is the safe direction.
+    pub authority: Arc<str>,
 }
 
 impl std::fmt::Display for RouteKey {
@@ -296,6 +308,7 @@ impl UpstreamRegistry {
                             transport: server.transport,
                             addr: *addr,
                             path: Arc::from(path.id().as_str()),
+                            authority: Arc::from(authority_of(server, *addr).as_str()),
                         };
                         let cookie = CookieState::new(&key);
                         routes.push(Arc::new(Route {
@@ -337,6 +350,7 @@ impl UpstreamRegistry {
                                     transport: TransportKind::Tcp,
                                     addr: *addr,
                                     path: Arc::from(cpath.id().as_str()),
+                                    authority: Arc::from(authority_of(server, *addr).as_str()),
                                 };
                                 let cookie = CookieState::new(&key);
                                 routes.push(Arc::new(Route {
@@ -420,6 +434,24 @@ impl UpstreamRegistry {
         for route in self.all_routes() {
             route.reset_connection().await;
         }
+    }
+}
+
+/// The resolver authority a route reaches.
+///
+/// An encrypted endpoint is its authentication name: whatever address we opened a socket
+/// to, the certificate had to be for that name, so that is the identity we can actually
+/// prove. A plaintext endpoint has no proven identity beyond the address it answered
+/// from, so the address is used.
+///
+/// The consequence that matters: `https://dns.google/dns-query` and `tls://dns.google`
+/// are one authority reached two ways, and `1.1.1.1` and `1.0.0.1` are two authorities
+/// even though one operator runs both — because nothing in the protocol lets us prove
+/// they are related.
+fn authority_of(server: &UpstreamServerConfig, addr: IpAddr) -> String {
+    match server.server_name.as_deref() {
+        Some(name) => name.trim_end_matches('.').to_ascii_lowercase(),
+        None => addr.to_string(),
     }
 }
 

@@ -439,6 +439,146 @@ pub fn udp_dns_reachable(addr: SocketAddr, timeout: std::time::Duration) -> Resu
     }
 }
 
+/// Perform a real DNS exchange over `transport` and report what happened.
+///
+/// A TCP connection to port 443 proves that a socket opened. It does not prove that
+/// anything there speaks DoH, that the certificate is for the name we configured, that
+/// ALPN negotiated, or that a DNS answer comes back — and each of those is a way a
+/// deployment fails while the port test passes. So each transport is exercised as itself.
+///
+/// Returns `Ok(detail)` describing a successful exchange, or `Err(reason)`.
+pub async fn transport_canary(
+    transport: crate::config::TransportKind,
+    addr: SocketAddr,
+    server_name: Option<&str>,
+    // DoH path. Unused until an HTTP canary exists; kept so the signature does not
+    // have to change when one is added.
+    _path: Option<&str>,
+    roots: std::sync::Arc<rustls::RootCertStore>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use crate::config::TransportKind as T;
+    match transport {
+        T::Udp => plain_dns_canary(addr, false, timeout).await,
+        T::Tcp => plain_dns_canary(addr, true, timeout).await,
+        T::Dot => dot_canary(addr, server_name, roots, timeout).await,
+        // DoH and DoQ ride HTTP/2, HTTP/3 and QUIC. Exercising them properly means
+        // running the real client stack, which the daemon already contains; doing it
+        // here would mean a second implementation that could disagree with the first.
+        // Reported honestly as untested rather than approximated with a port check.
+        T::Doh2 | T::Doh3 | T::Doq => Err(String::from(
+            "NOT_TESTED: this check does not implement an HTTP/2, HTTP/3 or QUIC client; \
+             a port probe would not prove the protocol works",
+        )),
+    }
+}
+
+/// A real Do53 exchange, over UDP or TCP.
+async fn plain_dns_canary(
+    addr: SocketAddr,
+    tcp: bool,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let outcome = crate::dns::query::run(crate::dns::query::Request {
+        // The root NS is answerable by every recursive resolver and is not a name whose
+        // absence says anything about the resolver's filtering policy.
+        name: String::from("."),
+        rtype: String::from("NS"),
+        server: addr.ip().to_string(),
+        port: addr.port(),
+        tcp,
+        dnssec: false,
+        timeout,
+    })
+    .await;
+    match outcome {
+        crate::dns::query::QueryOutcome::Answered {
+            rcode, elapsed_ms, ..
+        } if rcode == "NOERROR" => Ok(format!("answered NOERROR in {elapsed_ms}ms")),
+        crate::dns::query::QueryOutcome::Answered { rcode, .. } => {
+            Err(format!("answered {rcode} rather than NOERROR"))
+        }
+        crate::dns::query::QueryOutcome::Failed { reason } => Err(reason),
+    }
+}
+
+/// A real DoT exchange: TLS with certificate validation against the configured name,
+/// then a length-prefixed DNS query (RFC 7858).
+async fn dot_canary(
+    addr: SocketAddr,
+    server_name: Option<&str>,
+    roots: std::sync::Arc<rustls::RootCertStore>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let Some(name) = server_name else {
+        return Err(String::from(
+            "no server name is configured, so the certificate could not be validated",
+        ));
+    };
+    let started = std::time::Instant::now();
+
+    let result = tokio::time::timeout(timeout, async {
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("could not connect: {e}"))?;
+        let config = crate::tls::client_config(roots, &["dot"], false);
+        let dns_name = rustls_pki_types::ServerName::try_from(name.to_string())
+            .map_err(|_| format!("`{name}` is not a valid TLS name"))?;
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+        let mut tls = connector
+            .connect(dns_name, tcp)
+            .await
+            .map_err(|e| format!("TLS to `{name}` failed: {e}"))?;
+
+        let mut message = hickory_proto::op::Message::query();
+        let id = message.id;
+        message.add_query(hickory_proto::op::Query::query(
+            hickory_proto::rr::Name::root(),
+            hickory_proto::rr::RecordType::NS,
+        ));
+        message.metadata.recursion_desired = true;
+        let bytes = message
+            .to_vec()
+            .map_err(|e| format!("could not encode the query: {e}"))?;
+        let len = u16::try_from(bytes.len()).map_err(|_| String::from("query too long"))?;
+        tls.write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| format!("write failed: {e}"))?;
+        tls.write_all(&bytes)
+            .await
+            .map_err(|e| format!("write failed: {e}"))?;
+
+        let mut header = [0u8; 2];
+        tls.read_exact(&mut header)
+            .await
+            .map_err(|e| format!("no answer: {e}"))?;
+        let mut body = vec![0u8; usize::from(u16::from_be_bytes(header))];
+        tls.read_exact(&mut body)
+            .await
+            .map_err(|e| format!("truncated answer: {e}"))?;
+        let parsed = hickory_proto::op::Message::from_vec(&body)
+            .map_err(|e| format!("unparseable answer: {e}"))?;
+        if parsed.id != id {
+            return Err(String::from("the answer did not match the query id"));
+        }
+        Ok(parsed.metadata.response_code)
+    })
+    .await;
+
+    match result {
+        Err(_) => Err(format!("timed out after {timeout:?}")),
+        Ok(Err(e)) => Err(e),
+        Ok(Ok(hickory_proto::op::ResponseCode::NoError)) => Ok(format!(
+            "TLS validated for `{}` and DNS answered NOERROR in {}ms",
+            server_name.unwrap_or("?"),
+            started.elapsed().as_millis()
+        )),
+        Ok(Ok(code)) => Err(format!("TLS validated but DNS answered {code}")),
+    }
+}
+
 /// The systemd state of a unit, or `None` when systemd is not available.
 ///
 /// `LoadState` is consulted first and `ActiveState` only afterwards, because
