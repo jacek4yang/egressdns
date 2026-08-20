@@ -4,6 +4,90 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-08-20
+
+A default install now produces a resolver that works, and an installer that says so only
+when it does.
+
+### Fixed
+
+* **The post-install TCP canary failed on a working daemon.** Under `proxychains`,
+  `LD_PRELOAD` intercepts `connect(2)`, and a host whose `proxychains4.conf` has no active
+  `localnet` line routes loopback TCP to the SOCKS proxy — which reaches its *own*
+  loopback. The canary's connection closed without an RFC 7766 length prefix. UDP was
+  unaffected, because proxychains hooks `connect`, not datagram sends, which is exactly why
+  the symptom looked like a daemon defect. It was not: TCP ingress was never broken. The
+  canaries now run with the proxy interception environment cleared. See
+  [the incident report](docs/incidents/2026-08-installer-tcp-canary.md).
+* **The canary asked a question it did not need the answer to.** Local ingress is now
+  proven with `localhost`, which the special-use registry answers from local data over both
+  UDP and TCP, so a working daemon on a not-yet-reachable network is no longer reported as
+  broken. Internet reachability is a separate check, and takes a quorum of two of three
+  independent names so that one provider having a bad minute is not an install failure.
+* **A failed canary discarded the reason.** Output is captured and written to a diagnostic
+  report with unit status, the journal tail, listening sockets and the effective
+  configuration. Credentials in proxy URIs are redacted.
+* **A hostname in a URI was rewritten to another operator's name.**
+  `https://doh.dns.sb/dns-query` was canonicalised to `dot.sb`, authenticating against a
+  certificate nobody asked for and losing its bootstrap addresses. A hostname written in a
+  URI is now used exactly as written; only a bare handle like `quad9` is expanded, and the
+  expansion is transport-aware, because DoH and DoT hostnames differ for some operators.
+* **`ProcSubset`-class port checking.** The installer refused to install when *anything*
+  held port 53. systemd-resolved's stub is `127.0.0.53:53` and does not collide with
+  `127.0.0.1:53`, so a stock Debian or Ubuntu host was refused an install it could
+  perfectly well have had. Addresses are now compared.
+* A racy test: the closed-port half of the TCP reachability check dropped an
+  ephemeral-range listener, so a concurrent test binding `:0` could be handed the same port
+  and reopen it.
+
+### Added
+
+* **Built-in resolver profiles.** `upstreams = ["builtin:recommended"]` expands to five
+  independently operated public resolvers with their plaintext seeds and encrypted
+  endpoints. Every endpoint comes from the operator's own documentation, with the source
+  and the date it was last checked recorded on the entry. `recommended` contains no
+  filtering resolver: a filtering resolver's deliberate omissions are indistinguishable
+  from GeoDNS variation once mixed into one pool, and corroboration counts authorities.
+  Also `global`, `china`, `privacy`, `security-filtered` and `ad-blocking`.
+* **`egressdnsctl builtins`** prints the catalog with each endpoint's source, so a set of
+  resolvers an operator did not choose by hand is still one they can audit. Answered
+  locally, without the daemon.
+* **An installer that asks.** Who the resolver should serve, what to do about an existing
+  EgressDNS, whether to discard its configuration and its learned state separately, and
+  whether to repoint this machine's own lookups. Prompts read `/dev/tty`, because under the
+  documented `curl ... | sudo bash` invocation stdin *is* the script and reading it would
+  consume the installer's own remaining lines. Every default is the option that changes the
+  least, so pressing Enter throughout gives a loopback-only resolver and an otherwise
+  untouched system. Fully scriptable with `--non-interactive` and per-choice flags.
+* **LAN mode with derived, confirmed ACLs.** Client networks are proposed from the host's
+  own interfaces, skipping loopback, link-local, container bridges, tunnels and single-host
+  prefixes, and confirmed before use. `allow_from` covering the whole Internet is refused
+  outright, with a documented override for the operator who means it.
+* **A transactional system-resolver cutover.** `/etc/resolv.conf` is moved onto EgressDNS
+  only when asked and only after the daemon is proven to answer; the previous file is
+  preserved exactly, symlink as a symlink, and rollback restores it before anything else.
+
+### Changed
+
+* **Readiness is derived, not asserted.** The listeners being up *and* at least one
+  upstream route existing. A resolver with no routes can only SERVFAIL, and reporting it
+  ready tells an orchestrator to send it traffic. Not a health check of the routes — an
+  unhealthy route still counts, since upstreams recover and refusing traffic meanwhile
+  turns degradation into an outage.
+* Both configuration templates use `builtin:recommended` instead of a hand-written list
+  with an EDIT-THIS comment.
+
+### Known issues
+
+* **DNSSEC can be silently downgraded to Insecure when a route is blocked.** On a network
+  where some upstream routes are unreachable, a signed name may be answered with no AD bit
+  rather than validating or failing. Pre-existing in 2.0.0; more likely in 2.0.1, because
+  `builtin:recommended` puts encrypted endpoints in the pool by default. Bogus is still
+  SERVFAIL, so the fail-closed gate is unaffected. Characterised, reproducible and not yet
+  fixed — see
+  [the incident report](docs/incidents/2026-08-dnssec-downgrade-on-blocked-routes.md) for
+  the mechanism, why the obvious patch is wrong, and the operator workaround.
+
 ## [2.0.0] — 2026-08-19
 
 **Breaking: the configuration format is replaced, not translated.** A file from

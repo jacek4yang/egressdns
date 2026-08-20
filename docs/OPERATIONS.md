@@ -543,11 +543,27 @@ dig @<node> +dnssec cloudflare.com A        # must be NOERROR with AD set
 | *Everything* signed SERVFAILs | System clock skew — expired-signature and not-yet-valid both look like bogus. | `timedatectl status`; fix NTP, then `egressdnsctl flush-all`. |
 | Bogus only via one upstream | That upstream is mangling responses (a "DNS optimiser" middlebox). | Compare with another upstream directly; drop the offender from the group. |
 | AD never set on anything | `dnssec.mode` is not `validate`, or the upstream strips RRSIGs. | `dump-effective-config \| grep -A4 '\[dnssec\]'`; query the upstream directly with `+dnssec`. |
+| AD missing on *some* signed names, no error | A route in the pool is blocked, and the chain lookups that landed on it could not complete. See below. | Compare against a public validator: `dig +dnssec <name> @9.9.9.9`. If it sets AD and you do not, list only the reachable upstreams. |
 | AD set on things you did not validate | `trust_upstream_ad` was enabled. | Turn it off unless the upstream is yours and reached over an authenticated transport. |
 
-EgressDNS never fails open. If validation cannot complete, the answer is SERVFAIL with an
-EDE, not an unvalidated answer. The escape hatch for a client that wants raw data is the CD
-bit, which is honoured per query — not a server-side setting that silently degrades everyone.
+**Bogus is always SERVFAIL.** An answer that fails validation is refused with an EDE, never
+returned. There is no server-side setting that turns a bogus answer into data; the only
+escape hatch is the client's own CD bit, honoured per query.
+
+**But "cannot complete" is not always distinguishable from "unsigned", and that gap is
+real.** When a chain lookup fails — most often because a route in the pool is unreachable —
+the library reports the answer as *Insecure* rather than as an error, and an Insecure answer
+is served without AD. The result is a signed name answered as though its zone were unsigned:
+no error, no log line, and the verdict cached for the answer's TTL.
+
+This is a known defect, characterised and not yet fixed, because the obvious patch breaks
+islands of security — zones that sign their data and legitimately have no DS at the parent.
+[The incident report](incidents/2026-08-dnssec-downgrade-on-blocked-routes.md) has the
+mechanism and the reproduction.
+
+Operationally: on a network where some providers are unreachable, do not take a whole
+`builtin:` profile. `egressdnsctl builtins recommended` prints what it expands to; list the
+subset that actually answers.
 
 ## 14. IPv6 degradation
 

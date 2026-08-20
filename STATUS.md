@@ -1,6 +1,33 @@
 # Status
 
-**Version**: 2.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>
+**Version**: 2.0.1 · **Date**: 2026-08-20 · **Published**: <https://github.com/jacek4yang/egressdns>
+
+## 2.0.1 summary
+
+The installer release. Every claim is marked with the command or test behind it.
+
+| Claim | Evidence |
+| --- | --- |
+| The post-install TCP canary failure was proxychains, not the daemon | **Measured** on this host: under `proxychains -q`, `egressdnsctl query --tcp 127.0.0.1:53` returned `no length prefix from 127.0.0.1:53: early eof`; the same command with `env -u LD_PRELOAD` returned NOERROR with an answer. Every `localnet` line in `/etc/proxychains4.conf` is commented out, so loopback TCP was routed to the SOCKS proxy |
+| TCP ingress was never broken | **Measured** — `dig +tcp @127.0.0.1 example.com A` returns NOERROR with 2 answers; `egressdnsctl query --tcp` likewise |
+| The canaries no longer inherit proxy interception | **Tested** — `a_local_canary_runs_with_proxy_interception_cleared` runs the shipped `canary()` with `LD_PRELOAD`, `ALL_PROXY`, `http_proxy` and `HTTPS_PROXY` set and asserts none reach the control client. Fails against 2.0.0 |
+| A failed canary reports the reason | **Tested** — `a_failing_canary_reports_the_reason_rather_than_discarding_it`. Fails against 2.0.0 |
+| Local ingress is proven without the Internet | **Tested** — `the_local_canary_uses_a_name_the_daemon_answers_itself`; `localhost` is answered from the special-use registry over both UDP and TCP |
+| Prompts never read stdin | **Tested** — `prompts_read_the_terminal_and_never_stdin` asserts every `read` in `ask_yes_no`, `ask_line` and `ask_choice` uses `</dev/tty`. Under `curl \| bash`, stdin is the script |
+| The interview works on a real terminal | **Measured** — driven over a PTY: defaults yield `MODE=local CIDRS=[] RESOLVER=keep`; answering `2`, a CIDR and `y` yields `MODE=lan CIDRS=[192.168.31.0/24] RESOLVER=replace` |
+| Unattended installs take the safe option | **Tested** — `without_a_terminal_the_defaults_are_the_safe_ones` |
+| An Internet-wide `allow_from` is refused | **Tested** — `an_allow_from_covering_the_internet_is_refused`, for both `0.0.0.0/0` and `::/0`, and the documented override still works. **Measured** over a PTY |
+| The generated configuration is one the daemon accepts | **Tested** — `the_generated_configuration_matches_the_answers` runs `egressdnsd --check-config` against both the local and the LAN file it generated |
+| LAN detection proposes only real client networks | **Measured** on this host — `192.168.31.0/24` plus three global /64s; `docker0`, link-local and single-host prefixes excluded. **Tested** — two tests |
+| resolv.conf is touched only on request, after verification, and is recoverable | **Tested** — `the_system_resolver_is_only_touched_on_request_and_is_recoverable` asserts the guard, the symlink capture, and that `health_check` precedes the cutover in `main` |
+| Rollback restores DNS before anything else | **Tested** — `rollback_restores_name_resolution_first` |
+| A one-command install succeeds under proxychains | **Measured** — `proxychains -q sudo ./install.sh --local-build --non-interactive --replace-existing` completed on this host, all canaries passing including TCP. This is the exact invocation that failed in 2.0.1's predecessor |
+| The built-in catalog is internally consistent | **Tested** — 12 tests in `config::builtins`: unique ids and aliases, no address owned twice, every alias/address/endpoint maps to exactly one authority, `recommended` is 5–8 distinct *operators* and contains no filtering resolver |
+| A URI hostname is never rewritten to another operator's name | **Tested** — `a_hostname_written_in_a_uri_keeps_its_own_identity`. Found by the catalog tests: `https://doh.dns.sb/dns-query` was being canonicalised to `dot.sb` |
+| Readiness requires a route to send queries to | **Tested** — `App::is_ready` is the listener flag *and* a non-empty route set |
+| DNSSEC can be downgraded to Insecure by a blocked route | **Measured and NOT fixed** — with `builtin:recommended` on this restricted network, `example.com` answers `authenticated=false`; with the same profile's plaintext subset it answers `true`. Both from an empty state database. See [the incident report](docs/incidents/2026-08-dnssec-downgrade-on-blocked-routes.md) |
+| Bogus is still SERVFAIL | **Measured** — `dig @127.0.0.1 dnssec-failed.org A` returns SERVFAIL with EDE 6; the installer treats this as a fatal gate on every install |
+| Full suite | **Measured** — 583 tests pass, 0 fail, across `cargo test --workspace --all-features`; `cargo clippy --all-targets --all-features -- -D warnings` clean; `check-config-docs.py` and `pin-github-actions.sh --check` clean |
 
 ## 2.0.0 summary
 
