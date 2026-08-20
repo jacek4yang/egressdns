@@ -332,7 +332,7 @@ mod tests {
 
     fn validating() -> DnssecConfig {
         DnssecConfig {
-            mode: DnssecMode::Validate,
+            mode: DnssecMode::Strict,
             ..DnssecConfig::default()
         }
     }

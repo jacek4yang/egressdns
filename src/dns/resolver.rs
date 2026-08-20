@@ -447,6 +447,124 @@ impl Resolver {
         });
     }
 
+    /// Validate an answer the client has already been given, and act on the verdict.
+    ///
+    /// The evidence plane. Nothing here is on any client's critical path: it takes no
+    /// foreground deadline, it is bounded by its own timeout and by a small ceiling on
+    /// concurrent validations, and when that ceiling is reached the work is dropped rather
+    /// than queued. Dropping is correct — this improves the *next* answer, and a debt
+    /// queued behind a burst improves nothing.
+    ///
+    /// The four verdicts, and what each is worth:
+    ///
+    /// * **Bogus** — the served variant is forged. Evict and quarantine it, so it is
+    ///   served at most once and never again. This is the only outcome that removes data.
+    /// * **Secure** — promote, so the next client gets AD.
+    /// * **ProvenInsecure** — record it, so the next client is not made to re-derive it.
+    /// * **Incomplete, Timeout, TransportFailure, Indeterminate** — we learned nothing.
+    ///   Leave the entry exactly as it was. Deleting an answer because we could not check
+    ///   it is how a slow network becomes an outage.
+    fn spawn_background_validation(
+        self: &Arc<Self>,
+        key: &CacheKey,
+        message: Message,
+        options: DnsRequestOptions,
+    ) {
+        let Ok(permit) = Arc::clone(&self.proof_completion_slots).try_acquire_owned() else {
+            return;
+        };
+        let Some(validator) = self
+            .validators
+            .get(&key.view.group)
+            .or_else(|| self.validators.values().next())
+            .cloned()
+        else {
+            return;
+        };
+
+        metrics::counter!(crate::metrics::names::DNSSEC_PROOF_COMPLETION_TOTAL).increment(1);
+        let budget = self.config.dnssec.proof_completion_timeout;
+        let cache = Arc::clone(&self.cache);
+        let cfg = Arc::clone(&self.config);
+        let key = key.clone();
+        let mut options = options;
+        options.max_request_depth = cfg.dnssec.max_validation_depth;
+
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let request = hickory_proto::op::DnsRequest::new(message, options);
+            // No `deadline::with_deadline` scope: background work is not racing a client,
+            // and inheriting an expired client deadline would fail every validation
+            // instantly.
+            let (result, observed) = crate::dns::proofwatch::watch(async {
+                tokio::time::timeout(budget, async {
+                    let mut stream = validator.send(request);
+                    stream.next().await
+                })
+                .await
+            })
+            .await;
+            drop(permit);
+
+            let outcome = match result {
+                Err(_) => ValidationOutcome::Timeout,
+                Ok(Some(Ok(response))) => {
+                    let msg = response.into_message();
+                    policy_dnssec::classify(&msg, &cfg.dnssec, false, observed)
+                }
+                Ok(Some(Err(_))) => {
+                    if observed == crate::dns::proofwatch::ProofFailure::None {
+                        ValidationOutcome::Bogus
+                    } else {
+                        ValidationOutcome::IncompleteProof
+                    }
+                }
+                Ok(None) => ValidationOutcome::TransportFailure,
+            };
+
+            metrics::counter!(
+                crate::metrics::names::DNSSEC_OUTCOME_TOTAL,
+                "outcome" => outcome.label(),
+                "plane" => "evidence",
+            )
+            .increment(1);
+
+            // The fingerprint of whatever is cached *now*, so a verdict cannot act on an
+            // answer it did not examine.
+            let fingerprint = match cache.get(&key, Instant::now()) {
+                Lookup::Fresh { entry, .. } | Lookup::Stale { entry, .. } => entry.fingerprint,
+                _ => return,
+            };
+
+            match outcome {
+                ValidationOutcome::Bogus => {
+                    if cache.evict_variant(&key, fingerprint) {
+                        tracing::warn!(
+                            event = "dnssec.bogus",
+                            name = %key.name,
+                            qtype = %key.qtype,
+                            "a served answer failed validation and has been evicted"
+                        );
+                        metrics::counter!(crate::metrics::names::DNSSEC_EVICTED_TOTAL).increment(1);
+                    }
+                }
+                ValidationOutcome::Secure => {
+                    if cache.promote(&key, fingerprint, DnssecStatus::Secure) {
+                        tracing::debug!(event = "dnssec.secure", name = %key.name);
+                    }
+                }
+                ValidationOutcome::ProvenInsecure => {
+                    cache.promote(&key, fingerprint, DnssecStatus::Insecure);
+                }
+                // Nothing was learned, so nothing changes.
+                ValidationOutcome::IncompleteProof
+                | ValidationOutcome::Timeout
+                | ValidationOutcome::TransportFailure
+                | ValidationOutcome::Indeterminate => {}
+            }
+        });
+    }
+
     fn next_seed(&self) -> u64 {
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
         crate::util::fnv1a64(&n.to_le_bytes())
@@ -552,7 +670,7 @@ impl Resolver {
         let group_name = datasets
             .group_for(&qname)
             .unwrap_or_else(|| Arc::from(self.config.upstream.default_group.as_str()));
-        let validating = matches!(self.config.dnssec.mode, DnssecMode::Validate);
+        let validating = self.config.dnssec.mode.wants_dnssec_records();
         let client_do = request
             .edns
             .as_ref()
@@ -1005,7 +1123,7 @@ impl Resolver {
         let group = datasets
             .group_for(host)
             .unwrap_or_else(|| Arc::from(self.config.upstream.default_group.as_str()));
-        let validating = matches!(self.config.dnssec.mode, DnssecMode::Validate);
+        let validating = self.config.dnssec.mode.wants_dnssec_records();
         let net = self.network.load();
         let mut families: Vec<RecordType> = Vec::with_capacity(2);
         if net.v4 != crate::network::FamilyState::Unusable {
@@ -1090,7 +1208,7 @@ impl Resolver {
         let mut query = hickory_proto::op::Query::query(name, key.qtype);
         query.set_query_class(key.qclass);
 
-        let validating = matches!(self.config.dnssec.mode, DnssecMode::Validate);
+        let validating = self.config.dnssec.mode.wants_dnssec_records();
         let mut message = Message::new(rand::random(), MessageType::Query, OpCode::Query);
         message.metadata.recursion_desired = true;
         message.metadata.checking_disabled = key.mode.checking_disabled;
@@ -1121,7 +1239,13 @@ impl Resolver {
         let budget = self.config.server.foreground_budget;
         let seed = self.next_seed();
 
-        let (response, route, trust_ad) = if validating && !key.mode.checking_disabled {
+        // Only Strict mode puts validation in front of the client. In Background mode —
+        // the default — the foreground fetches the answer and the evidence plane decides
+        // what happens to it next. See `DnssecMode::Background`.
+        let synchronous =
+            self.config.dnssec.mode.blocks_the_client() && !key.mode.checking_disabled;
+
+        let (response, route, trust_ad) = if synchronous {
             let validator = self
                 .validators
                 .get(&key.view.group)
@@ -1317,7 +1441,21 @@ impl Resolver {
 
         let status = dnssec_status(&response, &self.config.dnssec, trust_ad);
         if status == DnssecStatus::Bogus {
+            // Reachable in Strict mode, and in Background mode only when an upstream
+            // handed us records it had already marked Bogus. Either way this is a verdict
+            // about the data, and the one path that fails closed.
             return Err(ResolveError::DnssecBogus);
+        }
+
+        // Background mode: the client is about to be answered, and the proof follows.
+        //
+        // Whatever this returns will be cached as Provisional; the evidence plane
+        // promotes it to Secure, leaves it as ProvenInsecure, or evicts and quarantines
+        // it if it turns out to be Bogus. A variant that fails validation is therefore
+        // served at most once.
+        if matches!(self.config.dnssec.mode, DnssecMode::Background) && !key.mode.checking_disabled
+        {
+            self.spawn_background_validation(&key, message.clone(), options);
         }
 
         // A negative answer nobody signed is the classic forgery: it is how censorship,

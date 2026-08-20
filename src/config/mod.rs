@@ -5,6 +5,8 @@
 //! fully deserialized tree before the configuration is ever activated, and activation
 //! itself is an atomic pointer swap (see [`crate::runtime::App`]).
 
+pub mod auto;
+pub mod autoprobe;
 pub mod builtins;
 mod defaults;
 pub mod endpoint;
@@ -952,7 +954,7 @@ pub struct DnssecConfig {
 impl Default for DnssecConfig {
     fn default() -> Self {
         Self {
-            mode: DnssecMode::Validate,
+            mode: DnssecMode::Background,
             trust_anchor_file: None,
             trust_upstream_ad: false,
             max_concurrent_validations: 256,
@@ -972,8 +974,48 @@ pub enum DnssecMode {
     /// No local validation. DO is not set unless the client sets it, and AD is cleared
     /// unless an explicitly trusted upstream policy applies.
     Off,
-    /// Validate locally against the configured trust anchors.
-    Validate,
+
+    /// Validate after answering, not before. The default.
+    ///
+    /// A client gets the fastest admissible answer; validation runs in the evidence plane
+    /// and decides what happens to that answer *next*. A variant proven Bogus is evicted
+    /// and quarantined, so it is served at most once and never again; a variant proven
+    /// Secure is promoted, and only then does an answer carry AD.
+    ///
+    /// This is the mode because synchronous validation could not keep its promise. Proving
+    /// a name at the end of a four-zone CNAME chain — `www.bing.com` is the case that
+    /// forced this — needs more sequential DS and DNSKEY lookups than a 2.5-second
+    /// foreground budget holds. The lookups were cut off, and the library reports a
+    /// cut-off lookup as `Proof::Bogus`, so the resolver refused a name it could resolve
+    /// perfectly well. Availability was being spent on a check that never finished.
+    Background,
+
+    /// Validate before answering, and fail closed. For operators who require it.
+    ///
+    /// Honest about its cost: a name whose chain does not fit the validation deadline is
+    /// refused. That is the correct trade for some deployments and the wrong one for most,
+    /// which is why it is not the default.
+    Strict,
+}
+
+impl DnssecMode {
+    /// Whether a client waits for validation before being answered.
+    pub fn blocks_the_client(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+
+    /// Whether validation happens at all, in either plane.
+    pub fn validates(self) -> bool {
+        matches!(self, Self::Background | Self::Strict)
+    }
+
+    /// Whether outgoing queries should ask for DNSSEC records.
+    ///
+    /// True for `Background` as well as `Strict`: the evidence plane cannot validate what
+    /// the foreground did not ask for, and asking costs one EDNS flag.
+    pub fn wants_dnssec_records(self) -> bool {
+        self.validates()
+    }
 }
 
 // ---------------------------------------------------------------------------

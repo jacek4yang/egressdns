@@ -78,6 +78,8 @@ pub mod names {
     /// Answers served with AD cleared because the proof could not be completed in time.
     pub const DNSSEC_INDETERMINATE_SERVED_TOTAL: &str =
         "egressdns_dnssec_indeterminate_served_total";
+    /// Answers evicted after background validation proved them bogus.
+    pub const DNSSEC_EVICTED_TOTAL: &str = "egressdns_dnssec_evicted_total";
     /// Background proof completions started.
     pub const DNSSEC_PROOF_COMPLETION_TOTAL: &str = "egressdns_dnssec_proof_completion_total";
     /// Probe workers currently executing a job.
@@ -252,6 +254,10 @@ fn describe() {
     describe_counter!(
         names::DNSSEC_INDETERMINATE_SERVED_TOTAL,
         "Answers served with AD cleared because the proof could not be completed"
+    );
+    describe_counter!(
+        names::DNSSEC_EVICTED_TOTAL,
+        "Answers evicted after background validation proved them bogus"
     );
     describe_counter!(
         names::DNSSEC_PROOF_COMPLETION_TOTAL,

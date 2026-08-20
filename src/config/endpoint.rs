@@ -313,6 +313,20 @@ pub fn desugar(upstreams: &[String]) -> Result<Vec<UpstreamServerConfig>, String
     // parsed, so the rest of this function never has to know the catalog exists.
     let mut expanded: Vec<String> = Vec::with_capacity(upstreams.len());
     for entry in upstreams {
+        // `auto` is normally replaced at startup by what was measured on the host — the
+        // local gateway, the regionally fast resolvers. It is accepted here too so that
+        // `check-config` on a file containing it is meaningful, and so that a
+        // configuration is never invalid merely because probing has not happened yet. The
+        // static expansion is the one that works from anywhere.
+        if entry.trim() == "auto" {
+            expanded.extend(crate::config::auto::expand(
+                &crate::config::auto::GatewayProbe::Rejected(
+                    crate::config::auto::GatewayRejection::NoGateway,
+                ),
+                crate::config::auto::Region::Global,
+            ));
+            continue;
+        }
         if let Some(profile) = entry.trim().strip_prefix("builtin:") {
             let uris = crate::config::builtins::expand(profile).ok_or_else(|| {
                 format!(
