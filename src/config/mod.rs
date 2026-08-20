@@ -206,7 +206,7 @@ pub struct ServerConfig {
     /// * **Explicitly empty.** A deliberate deny-all. Respected as written.
     /// * **Explicitly populated.** Exactly those networks, and nothing else.
     ///
-    /// [`Self::effective_allow_from`] resolves the three into the list the ACL uses.
+    /// [`Config::effective_allow_from`] resolves the three into the list the ACL uses.
     pub allow_from: Option<Vec<IpNet>>,
     /// Client networks explicitly refused, evaluated before `allow_from`.
     pub deny_from: Vec<IpNet>,

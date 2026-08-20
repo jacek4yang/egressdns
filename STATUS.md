@@ -1,41 +1,44 @@
 # Status
 
-**Version**: 2.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>, branch `feat/v2-autonomous-adaptive-resolver`
+**Version**: 2.0.0 · **Date**: 2026-08-19 · **Published**: <https://github.com/jacek4yang/egressdns>
 
 ## 2.0.0 summary
 
-Seven defects fixed, two features added. Three of the defects were found by running the
-software rather than by reading it: two by installing it on a real host and watching it
-report perfect health while answering nothing, one by the load harness after a change the
-entire test suite accepted.
+Every claim is marked with the command or test behind it. Anything not verified says so.
 
 | Claim | Evidence |
 | --- | --- |
-| A `version = 2` file of two keys starts and answers | **Tested** — `tests/config_v2.rs::a_minimal_v2_configuration_starts_and_answers` |
-| One `https://` entry yields H3 and H2 candidates | **Tested** — `tests/config_v2.rs::one_https_upstream_becomes_both_http_versions` |
-| `proxies` is refused, never silently ignored | **Tested** — `tests/config_v2.rs::declaring_a_proxy_is_refused_rather_than_ignored` |
-| `doctor` detects port conflicts, forwarding loops and ACL gaps | **Tested** — 20 tests in `src/doctor/` |
-| `doctor` runs correctly on a real host | **Measured** — run under `sudo` against the live deployment; found and then confirmed the fix for two of its own misdiagnoses |
-| `ProcSubset=pid` broke all resolution | **Measured** — reproduced under `systemd-run`; see `docs/incidents/2026-08-deployment-failure.md` |
-| A blind address-family detector still resolves | **Tested** — `tests/deployment.rs::a_failed_address_family_detection_still_resolves` |
-| The packaged unit does not hide `/proc/net` | **Tested** — `tests/deployment.rs::the_systemd_unit_does_not_hide_proc_net_from_the_detector` |
-| A proven route outranks untried routes | **Tested** — `src/upstream/scheduler.rs::a_proven_route_outranks_routes_that_have_never_been_tried`, fails before the fix |
-| The ranking fix changes real behaviour | **Measured** — same host, same ten real names, back to back: 0/30 answered before, 9/30 after |
-| No untried ranked route is skipped by fallback | **Tested** — three tests in `tests/scheduler_contract.rs` |
-| One absolute deadline covers the truncation retry | **Tested** — `tests/scheduler_contract.rs::truncation_retry_cannot_exceed_the_foreground_deadline`, measured 4.005s against a 2.5s budget before the fix |
-| Cancelled exchanges keep their slot, bounded | **Measured** — unbounded retention took truncation from 15,285 qps at 100% to 1,187 at 0%; capped at 100ms it is 16,336 qps at 100% |
-| Reload publishes one coherent policy generation | **Structural** — the request path reads config-derived policy from the `Config` the `ArcSwap` publishes; plus **Tested** by `effective_mode_ignores_an_override_stronger_than_the_live_configuration` |
-| Real DNSSEC validation works end to end | **Measured** — `dig +dnssec @127.0.0.1 cloudflare.com A` returns NOERROR with the `ad` flag set, against real upstreams on port 53 |
-| systemd lifecycle is clean | **Measured** — two `reload`s under continuous traffic with zero failed queries; `stop`/`start` cycle clean; `systemd-analyze security` **1.7 OK** |
-| Answers agree with Unbound | **Measured** — `scripts/differential-test.py`, both forwarding to the same upstream, Unbound 1.22.0 with DNSSEC validation: **15 cases agree, 0 differ** |
-| The installer canary rejects a broken resolver | **Tested** — `tests/installer.rs`, five cases, running `canary()` extracted from the shipped `install.sh` |
-| `dig` exits 0 on REFUSED, so the old canary passed a dead resolver | **Measured** — verified against a daemon whose ACL excluded loopback |
-| Sustained soak | **Measured** — 90 minutes, **177,250,187 queries**, 32,824 qps, success 1.000, 0 errors, 0 timeouts. RSS rose from 12 MB to a 103.0 MB plateau as the cache filled, then *declined* to 97.2 MB; threads flat at 6; file descriptors returned to their starting 11. p50 1.63 ms, p99 9.84 ms, p99.9 25.95 ms. |
-| CI green on the branch | **Measured** — run 32308436155, all seven jobs including the aarch64 cross build |
-| The aarch64 binary actually runs | **Measured** — the published aarch64 artifact under qemu-user: config validates, A queries answer, the `ad` flag is set on a signed name, TCP answers, NXDOMAIN is correct. Emulated, not native hardware. |
-| Release artifacts are reproducible from the workflow | **Measured** — v2.0.0-rc2 archives for x86_64 and aarch64 built by CI, `sha256sum -c SHA256SUMS` verifies |
-| Proxy egress | **Not implemented.** Declaring one is a hard error. |
+| The exact README configuration serves over UDP and TCP from loopback | **Tested** — `tests/config.rs::the_minimal_configuration_answers_over_udp_and_tcp`, built byte for byte with no injected listeners or ACL |
+| No runtime configuration version field exists | **Tested** — `tests/config.rs::there_is_no_configuration_version_field`, which also asserts the effective configuration never renders one |
+| The pre-2.0 format is refused by name, not half-applied | **Tested** — `the_legacy_upstream_group_syntax_is_refused_with_migration_advice`, `a_complete_v1_file_is_refused_before_serde_sees_it` |
+| Omitted ACL admits loopback; explicit empty denies all; non-loopback without an ACL is refused | **Tested** — four tests in `tests/config.rs` |
+| Proxies carry real DNS | **Tested** — `tests/proxy.rs`, real SOCKS5 and HTTP CONNECT servers in-process; 7 tests |
+| Proxy capability claims match the implementation | **Tested** — `udp_upstreams_are_not_offered_a_tcp_only_proxy`, `no_proxy_claims_udp_capability` |
+| Direct is preferred while healthy; a dead proxy does not break resolution | **Tested** — `the_direct_path_is_preferred_while_it_works`, `a_dead_proxy_does_not_break_resolution` |
+| Proxy credentials never reach logs, metrics or `--dump-config` | **Tested** — three tests across `config::proxy`, `upstream::egress` and `tests/config.rs` |
+| Arbitrary named endpoints bootstrap | **Measured** — `udp://resolver1.opendns.com` resolved to 2 addresses at startup and answered a live query on this host |
+| Bootstrap cycles are refused before any I/O, with the path | **Measured** — a self-referential upstream was refused with the full cycle printed; plus 3 tests |
+| Routes to one provider are one authority | **Tested** — `transport_and_path_diversity_do_not_multiply_authorities` |
+| An unsigned NXDOMAIN is corroborated, and can only be replaced by a positive | **Tested** — 4 tests in `tests/corroboration.rs` |
+| DNSSEC cannot exceed the ingress deadline | **Tested** — `dnssec_validation_cannot_exceed_the_foreground_deadline`; measured 2.004 s before the fix against a 1 s budget, 1.05 s after |
+| No untried ranked route is skipped | **Tested** — three tests in `tests/scheduler_contract.rs` |
+| The truncation retry fits the deadline | **Tested** — measured 4.005 s against a 2.5 s budget before the fix |
+| A proven route outranks untried ones | **Tested** — fails against the unpatched tree; **Measured** on a real host, 0/30 real names answered before, 9/30 after |
+| Port-443 evidence requires an HTTPS or SVCB record | **Tested** — `a_name_with_no_service_evidence_is_not_probed_on_port_443` |
+| Domain learning is bounded under adversarial cardinality | **Tested** — 100,000 distinct names into a 64-entry classifier |
+| `doctor` performs real protocol exchanges | **Measured** — on this host: "2 upstream endpoint(s) answered: udp/1.1.1.1:53 NOERROR in 262ms; udp/[2606:4700:4700::1111]:53 NOERROR in 374ms". DoH2, DoH3 and DoQ report `NOT_TESTED`, never `PASS` |
+| The installer canary rejects a broken resolver | **Tested** — 5 tests running the shipped `canary()` verbatim |
+| Installer rollback restores a *working* service | **Measured** — a genuinely failed cutover on this host, twice. Before the fix: files restored, service `failed`, `Connection refused`. After: "rolled back; the previous version is running again", DNS answering |
+| The systemd unit does not stop another resolver | **Tested** — `the_systemd_unit_does_not_stop_another_resolver` |
+| Answers agree with Unbound | **Measured** — Unbound 1.22.0 with DNSSEC, both forwarding to the same upstream: 15 agree, 0 differ |
+| Real-host DNS, DNSSEC, TCP, reload | **Measured** — `ad` flag set on signed names, fails closed on `dnssec-failed.org`, NXDOMAIN matches upstream, two reloads under traffic with zero dropped queries, `systemd-analyze security` 1.7 OK |
+| Throughput and tail latency against 1.0.0 | **Measured** — see CHANGELOG; parity on cache-served paths, 50–66% more throughput at ~a third of the tail latency where an upstream is involved |
+| Soak | **Measured** — 90 minutes, 177,250,187 queries, success 1.000, RSS plateaued then declined, fds and threads flat |
+| aarch64 | **Measured under emulation** — the published artifact serves DNS with the `ad` flag under qemu-user. Not native hardware. |
+| 24-hour soak | **Unverified.** 90 minutes was clean. |
 | DDR, SVCB/HTTPS discovery, RESINFO, ECH, ODoH, MASQUE | **Not implemented.** |
+| SOCKS5 UDP ASSOCIATE, so DoQ/DoH3 through a proxy | **Not implemented.** Direct-only, and the capability matrix says so. |
+| General multi-authority answer admissibility | **Not implemented.** Corroboration covers unsigned negatives. |
 
 Original 1.0.0 status follows.
 
