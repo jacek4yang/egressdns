@@ -321,3 +321,89 @@ enabled = false
         "the foreground budget is 2.5s; the truncation retry must fit inside it, took {elapsed:?}"
     );
 }
+
+/// DNSSEC validation must live inside the same ingress deadline as everything else.
+///
+/// A validating lookup fans out into DNSKEY and DS queries that each arrive at the
+/// scheduler as a separate resolution. Handing every one of them the configured budget
+/// let a chain of them spend several budgets while the client waited, and the wait for a
+/// validation permit could add another on top.
+///
+/// The upstream here never answers, so every sub-lookup runs to its own limit. What is
+/// asserted is not the answer — a validating resolver with no chain of trust must
+/// SERVFAIL — but that the client is failed within the promise.
+#[tokio::test]
+async fn dnssec_validation_cannot_exceed_the_foreground_deadline() {
+    // A UDP socket that is bound and never answers: every query against it runs the full
+    // attempt timeout rather than failing fast.
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = sink.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        while sink.recv_from(&mut buf).await.is_ok() {
+            // Received and dropped on the floor.
+        }
+    });
+
+    let fragment = format!(
+        r#"
+upstreams = ["{addr}"]
+proxies = []
+
+[dnssec]
+mode = "validate"
+max_concurrent_validations = 1
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#
+    );
+
+    // A 1s budget rather than the 2.5s default, so the failure mode separates cleanly:
+    // one permit and two concurrent queries means the second must queue, and before the
+    // fix that queuing was free — it spent a whole budget waiting and then started a
+    // fresh one to validate in, for roughly double the promise.
+    let daemon = std::sync::Arc::new(
+        Daemon::start_tuned(&fragment, |c| {
+            c.server.foreground_budget = Duration::from_secs(1);
+        })
+        .await,
+    );
+
+    let started = std::time::Instant::now();
+    let mut queries = Vec::new();
+    for i in 0..2 {
+        let d = std::sync::Arc::clone(&daemon);
+        queries.push(tokio::spawn(async move {
+            d.query_udp(&common::query(
+                &format!("secure{i}.example.test."),
+                RecordType::A,
+                false,
+            ))
+            .await
+        }));
+    }
+    let mut codes = Vec::new();
+    for q in queries {
+        codes.push(q.await.expect("join").metadata.response_code);
+    }
+    let elapsed = started.elapsed();
+
+    for code in &codes {
+        assert_eq!(
+            *code,
+            ResponseCode::ServFail,
+            "validation with no reachable chain of trust must fail closed"
+        );
+    }
+    assert!(
+        elapsed < Duration::from_millis(1_500),
+        "the foreground budget is 1s; a queued validation permit must be charged against \
+         it rather than granting a second budget, took {elapsed:?}"
+    );
+}

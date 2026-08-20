@@ -108,3 +108,29 @@ fn the_systemd_unit_does_not_hide_proc_net_from_the_detector() {
         );
     }
 }
+
+/// The unit must not stop another resolver as a side effect of being enabled.
+///
+/// `Conflicts=` does not mean "refuse to start if busy" — systemd stops the conflicting
+/// unit. Shipping `Conflicts=systemd-resolved.service` therefore meant that enabling
+/// EgressDNS silently took down whatever was resolving DNS for the host, at boot, with
+/// nobody watching. Port ownership is the installer's and `doctor`'s job, and both of
+/// them report rather than kill.
+#[test]
+fn the_systemd_unit_does_not_stop_another_resolver() {
+    let unit = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/packaging/systemd/egressdns.service"
+    ))
+    .expect("the packaged unit must exist");
+
+    for line in unit.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        assert!(
+            !line.starts_with("Conflicts="),
+            "the unit must not declare Conflicts=, which stops the other unit: {line}"
+        );
+    }
+}

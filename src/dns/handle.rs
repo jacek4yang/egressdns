@@ -19,6 +19,12 @@ use crate::upstream::pool::UpstreamGroup;
 use crate::upstream::scheduler::Scheduler;
 
 /// A `DnsHandle` backed by the adaptive scheduler.
+///
+/// `budget` is a *ceiling*, not an allowance. Validating one answer fans out into DNSKEY
+/// and DS lookups that each arrive here as a separate resolution, so handing every one of
+/// them the configured budget let a four-deep chain spend four budgets while the client
+/// waited. Each lookup now takes whichever is smaller: the configured per-query ceiling,
+/// or the time actually left on the request's ingress deadline.
 #[derive(Clone)]
 pub struct SchedulerHandle {
     scheduler: Arc<Scheduler>,
@@ -54,6 +60,8 @@ impl DnsHandle for SchedulerHandle {
         let (message, options) = request.into_parts();
         Box::pin(futures_util::stream::once(async move {
             let seed = rand::random::<u64>();
+            // Shared with the client request, not restarted for this sub-lookup.
+            let budget = crate::dns::deadline::remaining_or(budget);
             match scheduler
                 .resolve(&group, message, options, budget, seed)
                 .await

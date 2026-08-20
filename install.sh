@@ -386,30 +386,36 @@ start_service() {
     fi
 }
 
-# One canary query, judged on the answer rather than on dig's exit status.
+# One canary query, judged on the answer rather than on the exchange.
 #
-# `dig` exits 0 for SERVFAIL, REFUSED and NXDOMAIN alike: as far as it is concerned it
-# asked a question and got a reply. A check that only tests the exit status therefore
-# passes against a resolver that refuses or fails every query, which is precisely the
-# state this script exists to catch — see docs/incidents/2026-08-deployment-failure.md,
-# where a daemon that SERVFAILed everything sailed through the old check. So the rcode
-# must be NOERROR *and* the answer section must actually contain an address.
+# This runs `egressdnsctl query`, not `dig`. Two reasons, and both were defects:
+#
+#   * `dig` is optional. A host without bind9-dnsutils skipped the check entirely, so a
+#     broken cutover was "verified" by a check that never ran.
+#   * `dig` exits 0 for SERVFAIL, REFUSED and NXDOMAIN alike — it asked and something
+#     replied. A resolver failing every query passed. See
+#     docs/incidents/2026-08-deployment-failure.md.
+#
+# `egressdnsctl query` ships with the daemon, so it is always present, and exits non-zero
+# unless the rcode is NOERROR with a record in the answer.
 canary() {
-    local host="$1" port="$2" proto="$3"
-    local out rcode
-    # shellcheck disable=SC2086  # $proto is a single optional dig flag, intentionally split
-    out="$(dig @"$host" -p "$port" $proto +timeout=3 +tries=2 example.com A 2>/dev/null)"
-    if [ -z "$out" ]; then
-        warn "no response from ${host}:${port}"
+    local host="$1" port="$2" proto="$3" name="${4:-example.com}"
+    local args=(query "$name" --server "$host" --port "$port" --require-answer --wait 4)
+    [ "$proto" = "tcp" ] && args+=(--tcp)
+    if ! "$(path "$BIN_DIR")/$CONTROL" "${args[@]}" >/dev/null 2>&1; then
+        warn "${proto} canary against ${host}:${port} did not return a usable answer"
         return 1
     fi
-    rcode="$(printf '%s\n' "$out" | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)"
-    if [ "$rcode" != "NOERROR" ]; then
-        warn "resolver answered ${rcode:-nothing} rather than NOERROR"
-        return 1
-    fi
-    if ! printf '%s\n' "$out" | grep -qE '^[^;].*[[:space:]]IN[[:space:]]+A[[:space:]]'; then
-        warn "resolver returned NOERROR with no address in the answer section"
+    return 0
+}
+
+# A name that must fail DNSSEC validation, proving the resolver fails closed rather than
+# serving an answer it could not authenticate.
+canary_dnssec_bogus() {
+    local host="$1" port="$2"
+    if "$(path "$BIN_DIR")/$CONTROL" query dnssec-failed.org --server "$host" \
+        --port "$port" --dnssec --require-answer --wait 6 >/dev/null 2>&1; then
+        warn "a deliberately DNSSEC-bogus name was answered; validation is not failing closed"
         return 1
     fi
     return 0
@@ -430,22 +436,23 @@ health_check() {
     host="${host%]}"
     if [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ]; then host="127.0.0.1"; fi
 
-    if ! command -v dig >/dev/null 2>&1; then
-        warn "dig is not installed; skipping the DNS health checks"
-        return 0
-    fi
-
-    log "UDP health check against ${host}:${port}"
-    if ! canary "$host" "$port" ""; then
+    log "UDP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "udp"; then
         ROLLBACK_NEEDED=1
-        die "post-install UDP health check failed"
+        die "post-install UDP canary failed"
     fi
-    log "TCP health check against ${host}:${port}"
-    if ! canary "$host" "$port" "+tcp"; then
+    log "TCP canary against ${host}:${port}"
+    if ! canary "$host" "$port" "tcp"; then
         ROLLBACK_NEEDED=1
-        die "post-install TCP health check failed"
+        die "post-install TCP canary failed"
     fi
-    log "health checks passed"
+    # Only meaningful when validation is on, which it is by default.
+    log "DNSSEC fail-closed canary against ${host}:${port}"
+    if ! canary_dnssec_bogus "$host" "$port"; then
+        ROLLBACK_NEEDED=1
+        die "the resolver answered a DNSSEC-bogus name"
+    fi
+    log "canaries passed"
 }
 
 main() {

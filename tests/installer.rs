@@ -22,13 +22,14 @@ use hickory_proto::rr::RecordType;
 
 /// Extract `canary()` from `install.sh` and run it against one address.
 ///
+/// The shipped function shells out to `egressdnsctl query`, so the test points `BIN_DIR`
+/// and `CONTROL` at the binary this workspace just built — exercising the deployed code
+/// path rather than a copy of it.
+///
 /// Runs on a blocking thread. `Command::output` parks the calling thread until the child
 /// exits, and the resolver under test lives on this same runtime — running it inline made
 /// every query time out, so the negative cases passed for the wrong reason and the
 /// positive one failed outright.
-///
-/// Returns `None` when the tools this needs are absent, so the test skips rather than
-/// failing on a machine without `dig`.
 async fn canary(addr: SocketAddr, tcp: bool) -> Option<bool> {
     tokio::task::spawn_blocking(move || canary_blocking(addr, tcp))
         .await
@@ -37,13 +38,27 @@ async fn canary(addr: SocketAddr, tcp: bool) -> Option<bool> {
 
 fn canary_blocking(addr: SocketAddr, tcp: bool) -> Option<bool> {
     let install_sh = concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh");
-    let proto = if tcp { "+tcp" } else { "" };
+    // The test binary lives beside the built `egressdnsctl`.
+    let bin_dir = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .parent()?
+        .to_path_buf();
+    if !bin_dir.join("egressdnsctl").exists() {
+        // `cargo test` has not built the binary; skip rather than fail.
+        return None;
+    }
+    let proto = if tcp { "tcp" } else { "udp" };
     let script = format!(
         r#"
 warn() {{ printf '[warn] %s\n' "$*" >&2; }}
+path() {{ printf '%s' "$1"; }}
+BIN_DIR="{bin}"
+CONTROL="egressdnsctl"
 eval "$(sed -n '/^canary() {{/,/^}}/p' {install_sh})"
-canary {host} {port} "{proto}"
+canary {host} {port} "{proto}" "example.com"
 "#,
+        bin = bin_dir.display(),
         host = addr.ip(),
         port = addr.port(),
     );
@@ -53,11 +68,6 @@ canary {host} {port} "{proto}"
         .arg(&script)
         .output()
         .ok()?;
-    // `bash` ran but `dig` was missing: the function cannot judge anything, so skip.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.contains("dig: command not found") {
-        return None;
-    }
     Some(out.status.success())
 }
 
@@ -111,7 +121,7 @@ async fn the_canary_passes_a_resolver_that_actually_answers() {
         .await;
 
     let Some(udp) = canary(daemon.udp, false).await else {
-        eprintln!("skipping: dig is not available");
+        eprintln!("skipping: egressdnsctl is not built");
         return;
     };
     assert!(udp, "a resolver that answers must pass the UDP canary");
@@ -132,7 +142,7 @@ async fn the_canary_fails_a_resolver_that_refuses_everything() {
     // RFC 1035 rcode 5, REFUSED.
     let addr = responder_with_rcode(5).await;
     let Some(result) = canary(addr, false).await else {
-        eprintln!("skipping: dig is not available");
+        eprintln!("skipping: egressdnsctl is not built");
         return;
     };
     assert!(
@@ -147,7 +157,7 @@ async fn the_canary_fails_a_resolver_that_servfails_everything() {
     // RFC 1035 rcode 2, SERVFAIL.
     let addr = responder_with_rcode(2).await;
     let Some(result) = canary(addr, false).await else {
-        eprintln!("skipping: dig is not available");
+        eprintln!("skipping: egressdnsctl is not built");
         return;
     };
     assert!(
@@ -162,7 +172,7 @@ async fn the_canary_fails_a_resolver_that_returns_noerror_with_no_answer() {
     // RFC 1035 rcode 0, NOERROR, but the responder adds no records.
     let addr = responder_with_rcode(0).await;
     let Some(result) = canary(addr, false).await else {
-        eprintln!("skipping: dig is not available");
+        eprintln!("skipping: egressdnsctl is not built");
         return;
     };
     assert!(
@@ -181,7 +191,7 @@ async fn the_canary_fails_when_nothing_is_listening() {
     drop(socket);
 
     let Some(result) = canary(addr, false).await else {
-        eprintln!("skipping: dig is not available");
+        eprintln!("skipping: egressdnsctl is not built");
         return;
     };
     assert!(!result, "a dead address must not pass the canary");

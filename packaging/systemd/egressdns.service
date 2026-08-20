@@ -3,8 +3,11 @@ Description=EgressDNS adaptive caching DNS forwarder
 Documentation=https://github.com/jacek4yang/egressdns
 After=network-online.target
 Wants=network-online.target
-# Refuse to start if something else already owns port 53.
-Conflicts=systemd-resolved.service
+# Deliberately no `Conflicts=systemd-resolved.service`. `Conflicts` does not refuse to
+# start — it *stops the other unit*, so enabling this service would silently take down
+# whatever was resolving DNS for the host, at boot, with no operator present. Port
+# ownership is checked by the installer before cutover and by `egressdnsctl doctor` on
+# demand, both of which report what holds the port instead of killing it.
 
 [Service]
 Type=notify

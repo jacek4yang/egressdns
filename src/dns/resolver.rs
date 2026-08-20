@@ -257,7 +257,21 @@ impl Resolver {
     }
 
     /// Handle one client query end to end.
+    ///
+    /// The foreground deadline is established here, once, and carried on the task for
+    /// everything this request goes on to await — including the DNSSEC validator's own
+    /// DNSKEY and DS lookups, which come back through `SchedulerHandle` and would
+    /// otherwise each start their own budget.
     pub async fn handle(self: &Arc<Self>, request: &Message, transport: ClientTransport) -> Answer {
+        let deadline = Instant::now() + self.config.server.foreground_budget;
+        crate::dns::deadline::with_deadline(deadline, self.handle_inner(request, transport)).await
+    }
+
+    async fn handle_inner(
+        self: &Arc<Self>,
+        request: &Message,
+        transport: ClientTransport,
+    ) -> Answer {
         let max_size = self.max_response_size(request, transport);
 
         // ---- request validation -----------------------------------------------------
@@ -898,8 +912,11 @@ impl Resolver {
             // multiply into unbounded upstream work, and a wall-clock budget, so the
             // promise in `server.foreground_budget` holds for validated answers exactly as
             // it does for unvalidated ones.
+            // Waiting for a permit spends the client's time, so it is charged against the
+            // same deadline. Previously the wait could consume a whole budget and
+            // validation could then start a second one.
             let permit = match tokio::time::timeout(
-                budget,
+                crate::dns::deadline::remaining_or(budget),
                 Arc::clone(&self.validation_slots).acquire_owned(),
             )
             .await
@@ -922,7 +939,7 @@ impl Resolver {
             options.max_request_depth = self.config.dnssec.max_validation_depth;
             let request = hickory_proto::op::DnsRequest::new(message.clone(), options);
             use futures_util::StreamExt;
-            let outcome = tokio::time::timeout(budget, async {
+            let outcome = tokio::time::timeout(crate::dns::deadline::remaining_or(budget), async {
                 let mut stream = validator.send(request);
                 stream.next().await
             })

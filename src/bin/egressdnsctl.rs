@@ -66,6 +66,37 @@ enum Command {
     /// Answered locally, without the daemon, so it can be run before a cutover. Exits
     /// non-zero when a check finds something that would stop the resolver serving.
     Doctor,
+    /// Send one DNS query and report whether the answer is usable.
+    ///
+    /// Exists so that installation and health checks do not depend on `dig` being
+    /// present. It also judges the *answer* rather than the exchange: `dig` exits 0 for
+    /// SERVFAIL and REFUSED alike, which is how a resolver that answered nothing once
+    /// passed a post-install check.
+    Query {
+        /// Name to look up.
+        name: String,
+        /// Record type.
+        #[arg(long, default_value = "A")]
+        rtype: String,
+        /// Resolver to ask.
+        #[arg(long, default_value = "127.0.0.1")]
+        server: String,
+        /// Port.
+        #[arg(long, default_value_t = 53)]
+        port: u16,
+        /// Use TCP instead of UDP.
+        #[arg(long)]
+        tcp: bool,
+        /// Request DNSSEC records and report the AD bit.
+        #[arg(long)]
+        dnssec: bool,
+        /// Require an answer record, not merely NOERROR.
+        #[arg(long)]
+        require_answer: bool,
+        /// Seconds to wait.
+        #[arg(long, default_value_t = 5)]
+        wait: u64,
+    },
     /// Reload the configuration atomically.
     Reload,
     /// List every setting that cannot be changed by reload, and why.
@@ -159,6 +190,31 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}\n    {}\n", item.field, item.reason);
         }
         return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Command::Query {
+        name,
+        rtype,
+        server,
+        port,
+        tcp,
+        dnssec,
+        require_answer,
+        wait,
+    } = &cli.command
+    {
+        return run_query(
+            name,
+            rtype,
+            server,
+            *port,
+            *tcp,
+            *dnssec,
+            *require_answer,
+            *wait,
+            cli.json,
+        )
+        .await;
     }
 
     // `doctor` is always answered locally. Its whole purpose is to run before the daemon
@@ -258,12 +314,88 @@ fn run_doctor(cli: &Cli) -> ExitCode {
     ExitCode::from(report.exit_code())
 }
 
+/// Send one query and report on the answer.
+///
+/// Judged on the response, never on the fact that one arrived: a resolver that returns
+/// SERVFAIL or REFUSED to everything has answered, and is broken.
+#[allow(clippy::too_many_arguments)]
+async fn run_query(
+    name: &str,
+    rtype: &str,
+    server: &str,
+    port: u16,
+    tcp: bool,
+    dnssec: bool,
+    require_answer: bool,
+    wait: u64,
+    json: bool,
+) -> Result<ExitCode> {
+    use egressdns::dns::query::{self, QueryOutcome};
+
+    let outcome = query::run(query::Request {
+        name: name.to_string(),
+        rtype: rtype.to_string(),
+        server: server.to_string(),
+        port,
+        tcp,
+        dnssec,
+        timeout: Duration::from_secs(wait.clamp(1, 120)),
+    })
+    .await;
+
+    let usable = match &outcome {
+        QueryOutcome::Answered {
+            rcode, addresses, ..
+        } => rcode == "NOERROR" && (!require_answer || !addresses.is_empty()),
+        _ => false,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else {
+        match &outcome {
+            QueryOutcome::Answered {
+                rcode,
+                addresses,
+                authenticated,
+                elapsed_ms,
+                ..
+            } => {
+                println!(
+                    "{name} {rtype} via {}{server}:{port} -> {rcode}{} in {elapsed_ms}ms",
+                    if tcp { "tcp/" } else { "udp/" },
+                    if *authenticated { " (ad)" } else { "" }
+                );
+                for a in addresses {
+                    println!("  {a}");
+                }
+            }
+            QueryOutcome::Failed { reason } => {
+                eprintln!("{name} {rtype} via {server}:{port} -> {reason}");
+            }
+        }
+        if !usable {
+            eprintln!("the resolver did not return a usable answer");
+        }
+    }
+
+    Ok(if usable {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
 fn encode(command: &Command) -> (String, Vec<String>) {
     match command {
         Command::Status => ("status".into(), vec![]),
         Command::CheckConfig => ("check-config".into(), vec![]),
         // Answered locally before this point is reached; never sent to the daemon.
         Command::Doctor => ("doctor".into(), vec![]),
+        Command::Query { .. } => ("query".into(), vec![]),
         // Answered locally before this point is reached; never sent to the daemon.
         Command::ReloadContract => ("reload-contract".into(), vec![]),
         Command::Reload => ("reload".into(), vec![]),
