@@ -5,6 +5,7 @@
 //! fully deserialized tree before the configuration is ever activated, and activation
 //! itself is an atomic pointer swap (see [`crate::runtime::App`]).
 
+pub mod builtins;
 mod defaults;
 pub mod endpoint;
 pub mod proxy;
