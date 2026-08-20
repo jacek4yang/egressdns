@@ -46,85 +46,22 @@ pub struct Endpoint {
     pub hints: Vec<IpAddr>,
 }
 
-/// Bootstrap metadata for a well-known resolver.
-struct Provider {
-    /// Canonical authentication name.
-    name: &'static str,
-    /// Short aliases an operator may write instead of the full URI.
-    aliases: &'static [&'static str],
-    /// Published anycast addresses, used only as bootstrap candidates. The TLS identity
-    /// is always `name`, so a wrong address cannot become a wrong resolver.
-    addresses: &'static [&'static str],
-    /// DoH path, where the provider publishes one.
-    doh_path: &'static str,
+fn provider_for(host: &str) -> Option<&'static crate::config::builtins::Provider> {
+    crate::config::builtins::provider(host)
 }
 
-/// The provider registry.
+/// The identity a host in a URI authenticates as: itself.
 ///
-/// Bootstrap addresses live in one table rather than scattered through the code, and they
-/// are *only* a way to open a connection: every encrypted transport still validates the
-/// certificate against `name`, so a stale address fails closed rather than silently
-/// talking to somebody else.
-const PROVIDERS: &[Provider] = &[
-    Provider {
-        name: "cloudflare-dns.com",
-        aliases: &["cloudflare", "one.one.one.one"],
-        addresses: &[
-            "1.1.1.1",
-            "1.0.0.1",
-            "2606:4700:4700::1111",
-            "2606:4700:4700::1001",
-        ],
-        doh_path: "/dns-query",
-    },
-    Provider {
-        name: "dns.google",
-        aliases: &["google"],
-        addresses: &[
-            "8.8.8.8",
-            "8.8.4.4",
-            "2001:4860:4860::8888",
-            "2001:4860:4860::8844",
-        ],
-        doh_path: "/dns-query",
-    },
-    Provider {
-        name: "dns.quad9.net",
-        aliases: &["quad9"],
-        addresses: &["9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"],
-        doh_path: "/dns-query",
-    },
-    Provider {
-        name: "dns.adguard-dns.com",
-        aliases: &["adguard"],
-        addresses: &[
-            "94.140.14.14",
-            "94.140.15.15",
-            "2a10:50c0::ad1:ff",
-            "2a10:50c0::ad2:ff",
-        ],
-        doh_path: "/dns-query",
-    },
-];
-
-fn provider_for(host: &str) -> Option<&'static Provider> {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    PROVIDERS
-        .iter()
-        .find(|p| p.name == host || p.aliases.iter().any(|a| *a == host))
-}
-
-/// Expand a provider alias to its canonical name, if it is one.
+/// A hostname written in a URI is never rewritten. Mapping it to some other name from the
+/// catalog would authenticate against a certificate the operator did not ask for — and it
+/// broke `https://doh.dns.sb/...`, which was silently turned into `dot.sb`.
 fn canonical_name(host: &str) -> String {
-    match provider_for(host) {
-        Some(p) => p.name.to_string(),
-        None => host.trim_end_matches('.').to_ascii_lowercase(),
-    }
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Bootstrap addresses for a name, when the registry knows it.
 fn bootstrap_addresses(host: &str) -> Option<Vec<IpAddr>> {
-    let p = provider_for(host)?;
+    let p = crate::config::builtins::provider(host)?;
     Some(
         p.addresses
             .iter()
@@ -154,10 +91,27 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
     // A bare provider alias, e.g. "cloudflare".
     if !entry.contains("://") {
         if let Some(p) = provider_for(entry) {
+            // A bare alias, unlike a URI host, does have to be mapped to the hostname
+            // its certificate carries.
+            let host = crate::config::builtins::alias_endpoint_host(
+                entry,
+                crate::config::builtins::Transport::Doh,
+            )
+            .unwrap_or(p.id)
+            .to_string();
+            let path = p
+                .doh
+                .and_then(|d| {
+                    d.trim_start_matches("https://")
+                        .split_once('/')
+                        .map(|(_, r)| r)
+                })
+                .map(|r| format!("/{r}"))
+                .unwrap_or_else(|| String::from("/dns-query"));
             return Ok(doh_candidates(
-                EndpointHost::Name(p.name.to_string()),
+                EndpointHost::Name(host),
                 443,
-                p.doh_path,
+                &path,
                 Vec::new(),
             ));
         }
@@ -201,17 +155,26 @@ pub fn parse(entry: &str) -> Result<Vec<Endpoint>, String> {
     // `Url` keeps IPv6 literals in brackets in some accessors; normalise here so the host
     // is either a clean literal or a clean name.
     let host_str = host_str.trim_start_matches('[').trim_end_matches(']');
+    let transport = match url.scheme() {
+        "tls" => crate::config::builtins::Transport::Dot,
+        "quic" => crate::config::builtins::Transport::Doq,
+        _ => crate::config::builtins::Transport::Doh,
+    };
     let host = match host_str.parse::<IpAddr>() {
         Ok(addr) => EndpointHost::Addr(addr),
+        // A handle like `tls://quad9` is expanded; a real hostname is left alone.
+        Err(_) if crate::config::builtins::is_bare_alias(host_str) => EndpointHost::Name(
+            crate::config::builtins::alias_endpoint_host(host_str, transport)
+                .unwrap_or(host_str)
+                .to_string(),
+        ),
         Err(_) => EndpointHost::Name(canonical_name(host_str)),
     };
 
     match url.scheme() {
         "https" => {
             let path = match url.path() {
-                "" | "/" => provider_for(host_str)
-                    .map(|p| p.doh_path.to_string())
-                    .unwrap_or_else(|| String::from("/dns-query")),
+                "" | "/" => String::from("/dns-query"),
                 p => p.to_string(),
             };
             Ok(doh_candidates(
@@ -346,6 +309,24 @@ pub fn build_upstreams(upstreams: &[String]) -> Result<crate::config::UpstreamCo
 /// Each entry keeps its position in the generated name so that metrics, logs and
 /// `egressdnsctl upstreams` point back at the line the operator wrote.
 pub fn desugar(upstreams: &[String]) -> Result<Vec<UpstreamServerConfig>, String> {
+    // `builtin:` names expand to the URIs of a curated profile before anything else is
+    // parsed, so the rest of this function never has to know the catalog exists.
+    let mut expanded: Vec<String> = Vec::with_capacity(upstreams.len());
+    for entry in upstreams {
+        if let Some(profile) = entry.trim().strip_prefix("builtin:") {
+            let uris = crate::config::builtins::expand(profile).ok_or_else(|| {
+                format!(
+                    "`{entry}` names an unknown built-in profile; available profiles are {}",
+                    crate::config::builtins::profile_names().join(", ")
+                )
+            })?;
+            expanded.extend(uris);
+        } else {
+            expanded.push(entry.clone());
+        }
+    }
+    let upstreams = &expanded;
+
     let mut out = Vec::new();
     for (index, entry) in upstreams.iter().enumerate() {
         for candidate in parse(entry)? {
@@ -585,38 +566,62 @@ mod tests {
         assert!(desugar(&[]).is_err());
     }
 
-    /// Every registry entry must be internally consistent: parseable addresses, both
-    /// families represented, and aliases that resolve back to the canonical name.
+    /// A `builtin:` profile expands to the catalog's endpoints, seeds included.
+    ///
+    /// The catalog itself is checked in `config::builtins`; this is the seam.
     #[test]
-    fn the_provider_registry_is_well_formed() {
-        for p in PROVIDERS {
-            assert!(!p.addresses.is_empty(), "{} has no addresses", p.name);
-            let addrs: Vec<IpAddr> = p
-                .addresses
-                .iter()
-                .map(|a| a.parse().unwrap_or_else(|_| panic!("{a} in {}", p.name)))
-                .collect();
+    fn a_builtin_profile_expands_into_real_servers() {
+        let servers = desugar(&[String::from("builtin:recommended")]).expect("expands");
+        assert!(
+            servers.len() >= 10,
+            "expected several routes, saw {}",
+            servers.len()
+        );
+
+        let literal_seeds = servers.iter().filter(|s| s.server_name.is_none()).count();
+        assert!(
+            literal_seeds >= 5,
+            "each provider contributes a Do53 seed so the encrypted endpoints can be \
+             bootstrapped before DNS works, saw {literal_seeds}"
+        );
+        assert!(
+            servers.iter().any(|s| s.transport == TransportKind::Doh3),
+            "an https:// endpoint should yield an HTTP/3 candidate"
+        );
+        for s in servers.iter().filter(|s| s.server_name.is_some()) {
             assert!(
-                addrs.iter().any(|a| a.is_ipv4()),
-                "{} has no IPv4 bootstrap address",
-                p.name
+                !s.addresses.is_empty(),
+                "a catalog endpoint must carry bootstrap addresses: {s:?}"
             );
-            assert!(
-                addrs.iter().any(|a| a.is_ipv6()),
-                "{} has no IPv6 bootstrap address",
-                p.name
-            );
-            assert!(p.doh_path.starts_with('/'), "{} doh_path", p.name);
-            for alias in p.aliases {
-                assert_eq!(canonical_name(alias), p.name, "alias {alias}");
-            }
-            assert_eq!(canonical_name(p.name), p.name);
         }
+    }
+
+    #[test]
+    fn an_unknown_builtin_profile_names_the_real_ones() {
+        let e = desugar(&[String::from("builtin:nonsense")]).expect_err("refused");
+        assert!(e.contains("unknown built-in profile"), "{e}");
+        assert!(e.contains("recommended"), "{e}");
     }
 
     #[test]
     fn host_matching_is_case_and_trailing_dot_insensitive() {
         assert_eq!(canonical_name("Cloudflare-DNS.COM."), "cloudflare-dns.com");
-        assert_eq!(canonical_name("QUAD9"), "dns.quad9.net");
+        assert_eq!(canonical_name("DNS.Quad9.NET."), "dns.quad9.net");
+    }
+
+    /// A real hostname in a URI is never swapped for another operator name.
+    ///
+    /// DNS.SB serves DoH from `doh.dns.sb` and DoT from `dot.sb`. Canonicalising the
+    /// former to the latter authenticated the connection against a certificate the
+    /// operator never asked for, and left it with no bootstrap addresses.
+    #[test]
+    fn a_hostname_written_in_a_uri_keeps_its_own_identity() {
+        let v = parse("https://doh.dns.sb/dns-query").expect("parses");
+        for c in &v {
+            assert_eq!(c.host, EndpointHost::Name(String::from("doh.dns.sb")));
+        }
+
+        let t = one("tls://dot.sb");
+        assert_eq!(t.host, EndpointHost::Name(String::from("dot.sb")));
     }
 }

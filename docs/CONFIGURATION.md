@@ -159,12 +159,7 @@ These sit at the root of the file, before any table. Together they are a complet
 working configuration.
 
 ```toml
-upstreams = [
-    "1.1.1.1",
-    "2606:4700:4700::1111",
-    "https://cloudflare-dns.com/dns-query",
-    "tls://dns.quad9.net",
-]
+upstreams = ["builtin:recommended"]
 
 proxies = []
 ```
@@ -173,9 +168,9 @@ There is no configuration version field. The format is identified by its content
 file from before 2.0 is refused by name with a pointer to
 [the migration guide](MIGRATION-V1-TO-V2.md) rather than half-applied.
 
-Each `upstreams` entry may be a bare address (`1.1.1.1`, `1.1.1.1:5353`,
-`2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a provider alias (`cloudflare`,
-`google`, `quad9`, `adguard`), or a URI:
+Each `upstreams` entry may be a built-in profile (`builtin:recommended`), a bare address
+(`1.1.1.1`, `1.1.1.1:5353`, `2606:4700:4700::1111`, `[2606:4700:4700::1111]:5353`), a
+provider alias (`cloudflare`, `google`, `quad9`, `adguard`), or a URI:
 
 | Form | Becomes | Default port |
 | --- | --- | --- |
@@ -195,6 +190,40 @@ direct against proxied.
 `http://` is refused: it has the privacy cost of DoH and none of its integrity. An
 encrypted transport pointed at a literal address is also refused, because there would be
 no name to authenticate the certificate against.
+
+**Built-in profiles.** `builtin:<name>` expands to a curated set of independently operated
+public resolvers, each contributing its plaintext seeds *and* its encrypted endpoints. Every
+endpoint is taken from the operator's own documentation, with the source and the date it was
+last checked recorded alongside it. `egressdnsctl builtins` lists the profiles and
+`egressdnsctl builtins <name>` prints one in full — a set of resolvers you did not choose by
+hand is still one you can audit.
+
+| Profile | For |
+| --- | --- |
+| `builtin:recommended` | The default. Five independent operators, general-purpose, none filtering. |
+| `builtin:global` | Wider reach, still unfiltered. |
+| `builtin:china` | Reachable with low latency from mainland China. |
+| `builtin:privacy` | Operators with an explicit no-logging policy. |
+| `builtin:security-filtered` | Withhold known-malicious names. |
+| `builtin:ad-blocking` | Withhold advertising and tracking names. |
+
+`recommended` deliberately contains no filtering resolver. A filtering resolver's omissions
+are indistinguishable from ordinary GeoDNS variation once mixed into one pool, and
+corroboration counts *authorities* — so mixing policies would let one operator's editorial
+decision look like a consensus. Choose a filtering profile if you want filtering; do not mix
+one into an unfiltered pool.
+
+Profiles compose with everything else, so a private resolver alongside the built-in set is
+just another entry:
+
+```toml
+upstreams = ["builtin:recommended", "tls://dns.internal.example?addr=10.0.0.53"]
+```
+
+> On a network where some of a profile's endpoints are blocked, see the
+> [DNSSEC downgrade note](incidents/2026-08-dnssec-downgrade-on-blocked-routes.md): a
+> blocked route can cause a signed name to be answered without its AD bit. Listing only the
+> reachable providers avoids it.
 
 **Naming an endpoint DNS cannot resolve yet.** A named endpoint needs an address before it
 can be reached. Well-known providers carry published bootstrap addresses; any other name
@@ -216,7 +245,7 @@ measured path health rather than configured.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `upstreams` | list of endpoint URI | `[]` (empty) | Where to ask. At least one is required. |
+| `upstreams` | list of endpoint URI or `builtin:` profile | `[]` (empty) | Where to ask. At least one is required. |
 | `proxies` | list of proxy URI | `[]` (empty) | Egress proxies, tried when the direct path is unhealthy. |
 
 ### `[server]`

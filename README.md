@@ -15,17 +15,23 @@ design contract, and it is tested.
 ## The whole configuration
 
 ```toml
-upstreams = [
-    "1.1.1.1",
-    "https://cloudflare-dns.com/dns-query",
-    "https://dns.google/dns-query",
-]
+upstreams = ["builtin:recommended"]
 
 proxies = []
 ```
 
-That is a complete, working file. Listeners default to loopback, so a minimal
-configuration cannot accidentally become an open resolver.
+That is a complete, working file, and it is what the installer writes. `recommended`
+expands to five independently operated public resolvers with their plaintext seeds and
+their encrypted endpoints; `egressdnsctl builtins recommended` prints exactly what, and
+where each endpoint came from. Naming your own resolvers instead — or as well — is equally
+fine:
+
+```toml
+upstreams = ["1.1.1.1", "https://dns.google/dns-query", "tls://dns.quad9.net"]
+```
+
+Listeners default to loopback, so a minimal configuration cannot accidentally become an
+open resolver.
 
 You describe *where to ask*. The daemon decides *how*: UDP or TCP, HTTP/2 or HTTP/3, IPv4
 or IPv6, direct or through a proxy, which endpoint to prefer, when to hedge, when to break
@@ -116,19 +122,34 @@ One command, from a GitHub release:
 curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh | sudo bash
 ```
 
-Pin a version, and stage it without starting the service:
+It asks a few questions on your terminal — who the resolver should serve, what to do about
+an existing install, whether this machine should use it for its own lookups — and every
+default is the option that changes the least. Pressing Enter throughout gives a
+loopback-only resolver and an otherwise untouched system.
+
+Scripted installs answer the same questions with flags:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh \
-  | sudo bash -s -- --version v2.0.0 --no-start
+  | sudo bash -s -- --non-interactive --mode lan --lan-cidr 192.168.1.0/24
 ```
+
+`--help` lists them all. Pin a version with `--version v2.0.1`, stage without starting with
+`--no-start`.
 
 The installer detects the architecture, downloads the matching tarball, verifies its
 SHA-256 against the published `SHA256SUMS`, creates a system user, installs the systemd
-unit, and refuses to continue if something else already owns port 53 — it will not
-silently disable your existing resolver. It snapshots the previous binary, unit and config
-to a temporary backup directory under `$TMPDIR` (the exact path is printed in the install
-log) and rolls back automatically if the new version fails its health check.
+unit, and writes a configuration for the answers you gave. It will not disable your
+existing resolver: it refuses only when something holds an address it actually needs, so
+installing alongside systemd-resolved's `127.0.0.53:53` stub works.
+
+Nothing is called successful because systemd says `active`. Before the installer prints a
+summary it waits for readiness, then proves the daemon answers over UDP *and* over TCP
+using a name answered from local data, resolves real names on the Internet from a quorum of
+independent providers, and refuses a DNSSEC-Bogus name with SERVFAIL. Any failure prints
+the reason, writes a diagnostic report with secrets redacted, and rolls back — the previous
+binary, unit and configuration are snapshotted under `$TMPDIR` first, and the rollback
+verifies that the previous version came back rather than assuming it.
 
 Upgrade and uninstall are separate scripts with the same conventions:
 
@@ -140,7 +161,7 @@ sudo /usr/local/lib/egressdns/uninstall.sh --purge
 ### From source
 
 ```sh
-tar -xzf egressdns-v2.0.0-source.tar.gz
+tar -xzf egressdns-v2.0.1-source.tar.gz
 cd egressdns
 cargo build --release --locked
 sudo ./install.sh --local-build

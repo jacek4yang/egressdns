@@ -727,8 +727,19 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         assert!(tcp_reachable(addr, std::time::Duration::from_millis(500)).is_ok());
-        drop(listener);
-        assert!(tcp_reachable(addr, std::time::Duration::from_millis(500)).is_err());
+
+        // The closed-port half needs a port the kernel will not hand to somebody else
+        // between the drop and the probe. An ephemeral port is exactly the wrong choice:
+        // dropping it returns it to the pool, and any other test in this binary binding
+        // `:0` at that moment can be given it, at which point the port under test is open
+        // again and this assertion fails for reasons that have nothing to do with the
+        // code. Ports below `ip_local_port_range` are never auto-assigned.
+        let closed = std::net::TcpListener::bind("127.0.0.1:19531")
+            .or_else(|_| std::net::TcpListener::bind("127.0.0.1:19532"))
+            .expect("a fixed low port is free");
+        let closed_addr = closed.local_addr().expect("addr");
+        drop(closed);
+        assert!(tcp_reachable(closed_addr, std::time::Duration::from_millis(500)).is_err());
     }
 
     /// A Do53 probe must require an *answer*, not merely a route.
