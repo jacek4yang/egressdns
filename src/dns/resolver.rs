@@ -46,7 +46,9 @@ use crate::error::ResolveError;
 use crate::network::SharedNetworkState;
 use crate::policy::answer::{apply_answer_policy, AnswerContext};
 use crate::policy::cloudflare::Eligibility;
-use crate::policy::dnssec::{dnssec_status, earliest_rrsig_expiry, may_set_ad};
+use crate::policy::dnssec::{
+    self as policy_dnssec, dnssec_status, earliest_rrsig_expiry, may_set_ad, ValidationOutcome,
+};
 use crate::probe::job::{ProbeJob, ProbeQueue};
 use crate::ranking::QualityStore;
 use crate::upstream::scheduler::Scheduler;
@@ -118,6 +120,59 @@ pub struct Answer {
     pub max_size: usize,
 }
 
+/// Background proof completions allowed to run at once.
+///
+/// Small on purpose, and smaller than it first looks like it should be. These share the
+/// global upstream permits with client queries, so a generous ceiling here does not merely
+/// use spare capacity — it makes clients queue behind background work, which is the one
+/// thing this codebase does not do. Two is enough to warm a chain within a few queries.
+const PROOF_COMPLETION_CONCURRENCY: usize = 2;
+
+/// Log one `dnssec.proof_incomplete` line per this many occurrences.
+const INCOMPLETE_PROOF_LOG_EVERY: u64 = 64;
+
+/// Below this much remaining deadline, a second validation pass cannot finish, so the
+/// retry is skipped rather than started and abandoned.
+const MIN_REVALIDATION_BUDGET: Duration = Duration::from_millis(150);
+
+/// Why a resolution failed, in the terms the caller needs rather than as prose.
+///
+/// Three separate decisions used to be re-derived by searching the error text for the
+/// words "DNSSEC" and "bogus". That is fragile in the ordinary way, and it was wrong in a
+/// specific way: a failure whose message reads "DNSSEC proof could not be completed"
+/// contains both words and is the opposite of a bogus verdict.
+struct FailureReport {
+    /// Human-readable reason, used for the EDE text and the log.
+    detail: String,
+    /// Whether this failure may enter the failure cache.
+    remember: bool,
+    /// The RFC 8914 code to report.
+    ede: ExtendedError,
+}
+
+impl FailureReport {
+    fn from_error(e: &ResolveError) -> Self {
+        let ede = match e {
+            ResolveError::DnssecBogus => ExtendedError::DnssecBogus,
+            _ => ExtendedError::NoReachableAuthority,
+        };
+        Self {
+            detail: e.to_string(),
+            remember: !e.is_transient(),
+            ede,
+        }
+    }
+
+    /// A failure of the upstream, which is worth remembering for a while (RFC 9520).
+    fn upstream(detail: &str) -> Self {
+        Self {
+            detail: detail.to_string(),
+            remember: true,
+            ede: ExtendedError::NoReachableAuthority,
+        }
+    }
+}
+
 /// The foreground resolver.
 pub struct Resolver {
     /// Active configuration.
@@ -162,6 +217,11 @@ pub struct Resolver {
     stale_refresh: parking_lot::Mutex<HashMap<CacheKey, Instant>>,
     /// Monotonic counter used to derive deterministic exploration seeds.
     seq: AtomicU64,
+    /// How many answers have been served without a completed proof, used to sample the
+    /// log rather than emit one line per query on a congested network.
+    incomplete_proof_logs: AtomicU64,
+    /// Ceiling on background proof completions running at once.
+    proof_completion_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Resolver {
@@ -243,7 +303,148 @@ impl Resolver {
             validation_capacity,
             stale_refresh: parking_lot::Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            incomplete_proof_logs: AtomicU64::new(0),
+            proof_completion_slots: Arc::new(tokio::sync::Semaphore::new(
+                PROOF_COMPLETION_CONCURRENCY,
+            )),
         })
+    }
+
+    /// Fetch an answer we could not prove, if two independent authorities agree on it.
+    ///
+    /// Reached only when validation failed for a reason of *ours* — a deadline, an
+    /// unreachable route, an authority that refuses DS queries. Never on a Bogus verdict:
+    /// that path returns SERVFAIL before getting here, and must keep doing so.
+    ///
+    /// The corroboration requirement is what separates this from disabling DNSSEC when it
+    /// is inconvenient. Stalling one resolver's chain lookups is cheap for an on-path
+    /// attacker; producing the same answer from a second authority that *we* pick is not.
+    /// Answers obtained this way are served with AD cleared and a short TTL, and cached as
+    /// Indeterminate rather than as proof of anything.
+    async fn unproved_fallback(
+        &self,
+        group: &Arc<crate::upstream::pool::UpstreamGroup>,
+        message: &Message,
+        options: DnsRequestOptions,
+        seed: u64,
+        outcome: ValidationOutcome,
+    ) -> Option<Message> {
+        let slice = crate::dns::deadline::remaining_or(self.config.server.foreground_budget);
+        if slice < MIN_REVALIDATION_BUDGET {
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "unproved_no_budget",
+            )
+            .increment(1);
+            return None;
+        }
+
+        let Some((first, second)) = self
+            .scheduler
+            .resolve_pair(group, message.clone(), options, slice, seed)
+            .await
+        else {
+            // Fewer than two authorities answered. There is no entitlement to serve on
+            // one authority's word, so the original failure stands.
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "unproved_unavailable",
+            )
+            .increment(1);
+            return None;
+        };
+
+        // A negative answer is what an attacker wants from a downgrade, and the one shape
+        // this must never manufacture. Unproved positives may be served; an unproved
+        // negative leaves the original failure standing.
+        if first.message.metadata.response_code != ResponseCode::NoError
+            || first.message.answers.is_empty()
+        {
+            return None;
+        }
+
+        if !crate::policy::answers_are_compatible(&first.message, &second.message) {
+            tracing::warn!(
+                event = "dnssec.indeterminate_rejected",
+                outcome = outcome.label(),
+                "two authorities disagreed about an answer we could not prove"
+            );
+            metrics::counter!(
+                crate::metrics::names::CORROBORATION_TOTAL,
+                "outcome" => "unproved_conflict",
+            )
+            .increment(1);
+            return None;
+        }
+
+        metrics::counter!(
+            crate::metrics::names::CORROBORATION_TOTAL,
+            "outcome" => "unproved_agreed",
+        )
+        .increment(1);
+        Some(first.message)
+    }
+
+    /// Report, at a bounded rate, that an answer is being served without a completed
+    /// proof.
+    ///
+    /// One line per name per failure would be a flood on a congested network — which is
+    /// exactly when this fires — so it is sampled. A confirmed security failure is never
+    /// sampled; that is `dnssec.bogus`, and it is logged every time.
+    fn note_incomplete_proof(&self, key: &CacheKey, outcome: ValidationOutcome) {
+        metrics::counter!(crate::metrics::names::DNSSEC_INDETERMINATE_SERVED_TOTAL).increment(1);
+        let n = self.incomplete_proof_logs.fetch_add(1, Ordering::Relaxed);
+        if n.is_multiple_of(INCOMPLETE_PROOF_LOG_EVERY) {
+            tracing::warn!(
+                event = "dnssec.proof_incomplete",
+                name = %key.name,
+                qtype = %key.qtype,
+                outcome = outcome.label(),
+                suppressed = n,
+                "serving without AD: the chain could not be proved inside the budget"
+            );
+        }
+    }
+
+    /// Finish the proof after the client has been answered.
+    ///
+    /// The validator caches the chain elements it fetches, so completing a proof once in
+    /// the background is what lets the *next* query for the same zone validate inside the
+    /// foreground budget. This is the part that makes the degradation temporary rather
+    /// than permanent.
+    ///
+    /// Strictly background: it takes no client deadline, it is bounded by its own timeout
+    /// and by a small ceiling on concurrent completions, and if that ceiling is reached
+    /// the work is dropped rather than queued. A client never waits on it.
+    fn spawn_proof_completion(
+        self: &Arc<Self>,
+        group: &Arc<str>,
+        message: Message,
+        options: DnsRequestOptions,
+    ) {
+        let Ok(permit) = Arc::clone(&self.proof_completion_slots).try_acquire_owned() else {
+            // Already as many completions in flight as we allow. Dropping is correct:
+            // this is an optimisation for later queries, never a debt to be queued.
+            return;
+        };
+        let Some(validator) = self.validators.get(group).cloned() else {
+            return;
+        };
+        metrics::counter!(crate::metrics::names::DNSSEC_PROOF_COMPLETION_TOTAL).increment(1);
+        let budget = self.config.dnssec.proof_completion_timeout;
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let request = hickory_proto::op::DnsRequest::new(message, options);
+            // No `deadline::with_deadline` scope here on purpose: background work is not
+            // racing a client, and inheriting an expired client deadline would make every
+            // completion fail instantly.
+            let _ = tokio::time::timeout(budget, async {
+                let mut stream = validator.send(request);
+                stream.next().await
+            })
+            .await;
+            drop(permit);
+        });
     }
 
     fn next_seed(&self) -> u64 {
@@ -706,32 +907,45 @@ impl Resolver {
         max_size: usize,
     ) -> Answer {
         let budget = self.config.server.foreground_budget;
-        let result = match self.singleflight.join(key.clone()) {
-            Join::Leader(leader) => {
-                let outcome = self.fetch(&key).await;
-                match &outcome {
-                    Ok(entry) => leader.complete(Arc::clone(entry)),
-                    Err(e) => leader.fail(&e.to_string()),
+        // `remember` carries whether the failure may enter the failure cache. A proof we
+        // could not finish is not evidence that the name is broken, and caching it as one
+        // denies a working name for the whole failure TTL — long after the interruption
+        // that caused it has passed.
+        let result: Result<Arc<CacheEntry>, FailureReport> =
+            match self.singleflight.join(key.clone()) {
+                Join::Leader(leader) => {
+                    let outcome = self.fetch(&key).await;
+                    match &outcome {
+                        Ok(entry) => leader.complete(Arc::clone(entry)),
+                        Err(e) if e.is_transient() => leader.fail_uncacheable(&e.to_string()),
+                        Err(e) => leader.fail(&e.to_string()),
+                    }
+                    outcome.map_err(|e| FailureReport::from_error(&e))
                 }
-                outcome.map_err(|e| e.to_string())
-            }
-            Join::Follower(follower) => {
-                metrics::counter!(crate::metrics::names::SINGLEFLIGHT_COALESCED_TOTAL).increment(1);
-                match tokio::time::timeout(budget, follower.wait()).await {
-                    Ok(Ok(entry)) => Ok(entry),
-                    Ok(Err(e)) => Err(format!("{e:?}")),
-                    Err(_) => Err("coalesced request timed out".to_string()),
+                Join::Follower(follower) => {
+                    metrics::counter!(crate::metrics::names::SINGLEFLIGHT_COALESCED_TOTAL)
+                        .increment(1);
+                    match tokio::time::timeout(budget, follower.wait()).await {
+                        Ok(Ok(entry)) => Ok(entry),
+                        Ok(Err(e)) => Err(FailureReport {
+                            detail: e.detail().to_string(),
+                            remember: e.is_cacheable(),
+                            ede: ExtendedError::NoReachableAuthority,
+                        }),
+                        Err(_) => Err(FailureReport::upstream("coalesced request timed out")),
+                    }
                 }
-            }
-            Join::Saturated => {
-                metrics::counter!(
-                    crate::metrics::names::REJECTED_TOTAL,
-                    "reason" => "singleflight_saturated",
-                )
-                .increment(1);
-                Err("too many distinct queries in flight".to_string())
-            }
-        };
+                Join::Saturated => {
+                    metrics::counter!(
+                        crate::metrics::names::REJECTED_TOTAL,
+                        "reason" => "singleflight_saturated",
+                    )
+                    .increment(1);
+                    Err(FailureReport::upstream(
+                        "too many distinct queries in flight",
+                    ))
+                }
+            };
 
         match result {
             Ok(entry) => {
@@ -743,32 +957,34 @@ impl Resolver {
                     max_size,
                 }
             }
-            Err(detail) => {
+            Err(FailureReport {
+                detail,
+                remember,
+                ede,
+            }) => {
                 // Record the resolution failure so that repeated queries do not repeatedly
-                // hammer a failing upstream (RFC 9520).
-                let streak = self.cache.failure_streak(&key).saturating_add(1);
-                let base = self.config.cache.failure_min_ttl;
-                let ttl = base
-                    .saturating_mul(1u32 << streak.min(6))
-                    .min(self.config.cache.failure_max_ttl);
-                self.cache.record_failure(
-                    key,
-                    FailureEntry {
-                        recorded_at: Instant::now(),
-                        ttl,
-                        rcode: ResponseCode::ServFail,
-                        reason: "upstream resolution failed",
-                        consecutive: streak,
-                    },
-                );
+                // hammer a failing upstream (RFC 9520) — but only when the failure was
+                // about the upstream. See the `remember` flag above.
+                if remember {
+                    let streak = self.cache.failure_streak(&key).saturating_add(1);
+                    let base = self.config.cache.failure_min_ttl;
+                    let ttl = base
+                        .saturating_mul(1u32 << streak.min(6))
+                        .min(self.config.cache.failure_max_ttl);
+                    self.cache.record_failure(
+                        key,
+                        FailureEntry {
+                            recorded_at: Instant::now(),
+                            ttl,
+                            rcode: ResponseCode::ServFail,
+                            reason: "upstream resolution failed",
+                            consecutive: streak,
+                        },
+                    );
+                }
                 let mut msg = msgutil::error_response(request, ResponseCode::ServFail, true);
                 if self.config.dnssec.extended_errors {
-                    let code = if detail.contains("DNSSEC") || detail.contains("bogus") {
-                        ExtendedError::DnssecBogus
-                    } else {
-                        ExtendedError::NoReachableAuthority
-                    };
-                    msgutil::attach_ede(&mut msg, code, &detail);
+                    msgutil::attach_ede(&mut msg, ede, &detail);
                 }
                 Answer {
                     message: msg,
@@ -946,38 +1162,149 @@ impl Resolver {
 
             let mut options = options;
             options.max_request_depth = self.config.dnssec.max_validation_depth;
-            let request = hickory_proto::op::DnsRequest::new(message.clone(), options);
-            use futures_util::StreamExt;
-            let outcome = tokio::time::timeout(crate::dns::deadline::remaining_or(budget), async {
-                let mut stream = validator.send(request);
-                stream.next().await
-            })
-            .await;
+
+            // Validate, watching what the transport had to say about any failure.
+            //
+            // A chain lookup that never completed and a signature that does not verify
+            // both arrive as `Proof::Bogus`. `proofwatch` is what tells them apart; see
+            // the module for why the difference is not a nicety.
+            // Validation gets the whole remaining budget, and the fallback gets whatever
+            // is left over rather than a reservation taken out of it.
+            //
+            // Reserving a share was measured to be worse on exactly the networks that
+            // need help: where every lookup is slow, validation needs all the time there
+            // is, and taking 45% away from it lost more answers to the reservation than
+            // the fallback could win back. A validation that fails *early* — refused,
+            // unreachable — still leaves time, and that is the case the fallback exists
+            // for. One that runs out of time leaves none, and correctly gets none.
+            let validation_deadline =
+                tokio::time::Instant::now() + crate::dns::deadline::remaining_or(budget);
+
+            let mut attempt = 0;
+            let (mut response, outcome) = loop {
+                attempt += 1;
+                let slice = validation_deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(crate::dns::deadline::remaining_or(budget));
+                let request = hickory_proto::op::DnsRequest::new(message.clone(), options);
+                use futures_util::StreamExt;
+                let (result, observed) = crate::dns::proofwatch::watch(async {
+                    tokio::time::timeout(slice, async {
+                        let mut stream = validator.send(request);
+                        stream.next().await
+                    })
+                    .await
+                })
+                .await;
+
+                let (msg, outcome) = match result {
+                    Err(_) => (None, ValidationOutcome::Timeout),
+                    Ok(Some(Ok(response))) => {
+                        let msg = response.into_message();
+                        let outcome =
+                            policy_dnssec::classify(&msg, &self.config.dnssec, false, observed);
+                        (Some(msg), outcome)
+                    }
+                    Ok(Some(Err(e))) => {
+                        // The validator gave up rather than returning a message. Its own
+                        // report of *why* is the only signal here, and a transport
+                        // failure it saw is still a transport failure.
+                        let text = e.to_string();
+                        let outcome = if observed != crate::dns::proofwatch::ProofFailure::None {
+                            ValidationOutcome::IncompleteProof
+                        } else if text.contains("Bogus") || text.contains("bogus") {
+                            ValidationOutcome::Bogus
+                        } else {
+                            ValidationOutcome::TransportFailure
+                        };
+                        (None, outcome)
+                    }
+                    Ok(None) => (None, ValidationOutcome::TransportFailure),
+                };
+
+                // One retry, and only for failures that are about us. Retrying Bogus
+                // would be shopping for a resolver willing to say something else about
+                // forged data, which is the attack rather than the defence.
+                //
+                // The retry is worth making because the validator caches the chain
+                // elements it did manage to fetch: a second pass starts warm and usually
+                // finishes what the first ran out of time for.
+                let deadline_left = validation_deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    > MIN_REVALIDATION_BUDGET;
+                if attempt < 2 && outcome.is_retryable() && deadline_left {
+                    metrics::counter!(
+                        crate::metrics::names::DNSSEC_VALIDATION_FALLBACK_TOTAL,
+                        "reason" => outcome.label(),
+                    )
+                    .increment(1);
+                    continue;
+                }
+                break (msg, outcome);
+            };
             drop(permit);
 
+            metrics::counter!(
+                crate::metrics::names::DNSSEC_OUTCOME_TOTAL,
+                "outcome" => outcome.label(),
+            )
+            .increment(1);
+
             match outcome {
-                Err(_) => {
-                    return Err(ResolveError::Timeout {
-                        elapsed_ms: budget.as_millis() as u64,
-                    })
+                // Validation completed and the data failed it. This is the one path that
+                // fails closed, and it must stay that way.
+                ValidationOutcome::Bogus => {
+                    tracing::warn!(
+                        event = "dnssec.bogus",
+                        name = %key.name,
+                        qtype = %key.qtype,
+                    );
+                    return Err(ResolveError::DnssecBogus);
                 }
-                Ok(Some(Ok(response))) => {
-                    let msg = response.into_message();
+                ValidationOutcome::Secure | ValidationOutcome::ProvenInsecure => {
+                    let msg = response.take().ok_or(ResolveError::AllFailed {
+                        detail: "validator reported success without an answer".to_string(),
+                    })?;
                     (msg, None, false)
                 }
-                Ok(Some(Err(e))) => {
-                    let text = e.to_string();
-                    if text.contains("Bogus") || text.contains("bogus") {
-                        return Err(ResolveError::DnssecBogus);
+                // We could not check the answer. That is not a statement about the
+                // answer, and refusing to serve on it would hand anyone able to slow this
+                // network the power to erase names. Serve what we have with AD cleared
+                // and a short TTL, and finish the proof in the background so the next
+                // query for this name has a warm chain.
+                ValidationOutcome::IncompleteProof
+                | ValidationOutcome::TransportFailure
+                | ValidationOutcome::Timeout
+                | ValidationOutcome::Indeterminate => {
+                    let msg = match response.take() {
+                        Some(msg) => msg,
+                        // The validator gave up without producing a message, which is the
+                        // common shape: it returns an error rather than a partly-proved
+                        // answer. The data is still out there and still fetchable, so the
+                        // question is whether we are entitled to serve it unproved.
+                        //
+                        // Only when the failure was ours, and only with corroboration
+                        // from a second independent authority. That is what keeps this
+                        // from becoming a downgrade: an attacker who can stall our chain
+                        // lookups still has to produce the same answer from two
+                        // authorities we chose, rather than merely breaking one.
+                        None => match self
+                            .unproved_fallback(&group, &message, options, seed, outcome)
+                            .await
+                        {
+                            Some(msg) => msg,
+                            None => {
+                                return Err(ResolveError::ProofIncomplete {
+                                    outcome: outcome.label(),
+                                })
+                            }
+                        },
+                    };
+                    if outcome != ValidationOutcome::Indeterminate {
+                        self.note_incomplete_proof(key, outcome);
+                        self.spawn_proof_completion(&key.view.group, message.clone(), options);
                     }
-                    return Err(ResolveError::AllFailed {
-                        detail: crate::util::bounded(&text, 160),
-                    });
-                }
-                Ok(None) => {
-                    return Err(ResolveError::AllFailed {
-                        detail: "validator produced no answer".to_string(),
-                    })
+                    (msg, None, false)
                 }
             }
         } else {

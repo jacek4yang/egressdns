@@ -4,6 +4,7 @@ pub mod acl;
 pub mod deadline;
 pub mod handle;
 pub mod message;
+pub mod proofwatch;
 pub mod query;
 pub mod ratelimit;
 pub mod resolver;

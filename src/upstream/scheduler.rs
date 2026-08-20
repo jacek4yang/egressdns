@@ -491,6 +491,70 @@ impl Scheduler {
         ranked
     }
 
+    /// Ask two independent authorities the same question at once.
+    ///
+    /// Used when an answer could not be proved and may only be served if a second
+    /// authority agrees. The two attempts run *together*: sequentially they did not fit,
+    /// because validation has already spent most of the client's budget by the time this
+    /// starts, and a second round trip after the first pushed a 2.5-second promise past
+    /// five seconds.
+    ///
+    /// One attempt each, no hedging: this is a second opinion, not a search for one.
+    /// Returns `None` unless both answered, since a pair is the whole point.
+    pub async fn resolve_pair(
+        &self,
+        group: &UpstreamGroup,
+        message: Message,
+        options: DnsRequestOptions,
+        budget: Duration,
+        seed: u64,
+    ) -> Option<(UpstreamAnswer, UpstreamAnswer)> {
+        if budget.is_zero() {
+            return None;
+        }
+        let deadline = Instant::now() + budget;
+        let ranked = self.rank(group, seed);
+        let first = ranked.first().cloned()?;
+        let second = ranked
+            .iter()
+            .find(|r| r.key.authority != first.key.authority)
+            .cloned()?;
+
+        let run = |route: Arc<Route>, msg: Message| async move {
+            let result = self
+                .attempt(
+                    Arc::clone(&route),
+                    msg,
+                    options,
+                    deadline,
+                    group.scheduler.query_timeout,
+                    Duration::ZERO,
+                    None,
+                    // Shed rather than queue: this is already the degraded path, and
+                    // waiting for capacity would spend the time it exists to save.
+                    PermitPolicy::Shed,
+                )
+                .await;
+            let outcome = result.outcome?;
+            route.with_health(|h| {
+                h.record(outcome, result.latency, Instant::now(), &group.scheduler)
+            });
+            if outcome != AttemptOutcome::Success {
+                return None;
+            }
+            Some(UpstreamAnswer {
+                message: result.message?,
+                route: route.key.clone(),
+                latency: result.latency.unwrap_or_default(),
+                stream_retry: false,
+                trust_ad: route.trust_ad,
+            })
+        };
+
+        let (a, b) = tokio::join!(run(first, message.clone()), run(second, message));
+        Some((a?, b?))
+    }
+
     /// Ask a resolver authority other than `exclude`, for corroboration.
     ///
     /// Deliberately narrow: one attempt, one route, no hedge and no fallback. This exists
@@ -1000,9 +1064,26 @@ fn validate_response(
     client_cookie: [u8; 8],
 ) -> Result<(), (AttemptOutcome, String)> {
     if !msgutil::question_matches(request, response) {
+        // Name the mismatch. "did not match" alone sends an operator looking for a
+        // spoofed reply when the actual cause may be an empty question section, which
+        // several resolvers return on REFUSED.
+        let describe = |m: &Message| -> String {
+            if m.queries.is_empty() {
+                return String::from("<no question>");
+            }
+            m.queries
+                .iter()
+                .map(|q| format!("{} {} {}", q.name(), q.query_class(), q.query_type()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         return Err((
             AttemptOutcome::Malformed,
-            "response question did not match the query".to_string(),
+            format!(
+                "response question did not match the query: asked [{}], got [{}]",
+                describe(request),
+                describe(response)
+            ),
         ));
     }
     if response.metadata.message_type != hickory_proto::op::MessageType::Response {

@@ -937,6 +937,16 @@ pub struct DnssecConfig {
     ///
     /// Costs one extra query, on cold unsigned NXDOMAINs only.
     pub corroborate_negative: bool,
+
+    /// How long a background proof completion may run.
+    ///
+    /// When a chain cannot be proved inside the foreground budget the answer is served
+    /// with AD cleared, and the proof is finished afterwards so the *next* query for that
+    /// zone has a warm chain and validates normally. This bounds that background work. It
+    /// is deliberately far larger than the foreground budget — nothing is waiting on it —
+    /// and still bounded, because nothing here is unbounded.
+    #[serde(with = "humantime_serde")]
+    pub proof_completion_timeout: Duration,
 }
 
 impl Default for DnssecConfig {
@@ -949,6 +959,7 @@ impl Default for DnssecConfig {
             validation_cache_entries: 10_000,
             max_validation_depth: 12,
             corroborate_negative: true,
+            proof_completion_timeout: Duration::from_secs(20),
             extended_errors: true,
         }
     }

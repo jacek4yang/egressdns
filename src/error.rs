@@ -143,6 +143,17 @@ pub enum ResolveError {
     /// Local DNSSEC validation determined the data is bogus.
     #[error("DNSSEC validation failed (bogus)")]
     DnssecBogus,
+
+    /// Validation could not be completed, for a reason of ours rather than the answer's.
+    ///
+    /// Deliberately *not* [`ResolveError::DnssecBogus`]. A chain lookup that never
+    /// finished is not a verdict on the data, and treating it as one lets anyone able to
+    /// slow this resolver's auxiliary queries make names disappear. Never cached.
+    #[error("DNSSEC proof could not be completed ({outcome})")]
+    ProofIncomplete {
+        /// Which typed outcome the validation ended in.
+        outcome: &'static str,
+    },
     /// The resolver is shutting down.
     #[error("resolver shutting down")]
     ShuttingDown,
@@ -154,6 +165,17 @@ pub enum ResolveError {
         /// Configured ceiling of the semaphore whose permits were exhausted.
         limit: usize,
     },
+}
+
+impl ResolveError {
+    /// Whether this failure is about us rather than about the answer.
+    ///
+    /// A transient failure must not enter the failure cache: remembering "I could not
+    /// check this name" as "this name is broken" denies a working name for the whole
+    /// failure TTL, long after the interruption that caused it has passed.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::ProofIncomplete { .. })
+    }
 }
 
 /// Errors produced by the persistent storage layer.

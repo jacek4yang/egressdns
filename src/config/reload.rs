@@ -313,6 +313,7 @@ pub const RELOADABLE: &[&str] = &[
     "dnssec.extended_errors",
     "dnssec.max_validation_depth",
     "dnssec.mode",
+    "dnssec.proof_completion_timeout",
     "dnssec.trust_anchor_file",
     "dnssec.trust_upstream_ad",
     "dnssec.validation_cache_entries",
