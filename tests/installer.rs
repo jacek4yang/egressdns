@@ -240,3 +240,133 @@ fn rollback_restores_ownership_resets_failure_state_and_verifies_itself() {
         "a rollback that did not recover must say so plainly:\n{rollback}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The proxychains incident
+// ---------------------------------------------------------------------------
+
+/// A local canary must not be routed through a proxy.
+///
+/// `proxychains` hooks `connect(2)` through `LD_PRELOAD`. With no `localnet` bypass — the
+/// default on Debian — *every* TCP connection the process makes goes to the SOCKS proxy,
+/// including one to 127.0.0.1. So the installer's TCP canary asked a proxy on another host
+/// to reach `127.0.0.1:53`, got that host's loopback, and the stream closed with no RFC
+/// 7766 length prefix. UDP was untouched, because proxychains intercepts TCP connect and
+/// not datagram sends, which is why the failure looked like a TCP ingress defect in the
+/// daemon rather than what it was.
+///
+/// The question a local canary asks is "is the resolver on *this machine* answering". Sent
+/// through an intermediary it answers a different question, so the interception is cleared
+/// for the canary command — and only for it, because artifact downloads genuinely do need
+/// the proxy.
+///
+/// See `docs/incidents/2026-08-installer-tcp-canary.md`.
+#[test]
+fn a_local_canary_runs_with_proxy_interception_cleared() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+
+    // Stand in for `egressdnsctl`, recording the environment it was given.
+    let stub = bin.join("egressdnsctl");
+    let env_dump = dir.path().join("env.txt");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\nenv > {}\nexit 0\n", env_dump.display()),
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub).expect("stat").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod");
+
+    let install_sh = concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh");
+    let script = format!(
+        r#"
+warn() {{ printf '[warn] %s\n' "$*" >&2; }}
+log()  {{ printf '[log] %s\n' "$*"; }}
+path() {{ printf '%s' "$1"; }}
+BIN_DIR="{bin}"
+CONTROL="egressdnsctl"
+eval "$(sed -n '/^canary() {{/,/^}}/p' {install_sh})"
+canary 127.0.0.1 53 "tcp" "localhost"
+"#,
+        bin = bin.display(),
+    );
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        // Exactly what `proxychains -q bash` leaves in the environment.
+        .env(
+            "LD_PRELOAD",
+            "/usr/lib/x86_64-linux-gnu/libproxychains.so.4",
+        )
+        .env("ALL_PROXY", "socks5://192.168.31.105:10808")
+        .env("http_proxy", "http://192.168.31.105:10809")
+        .env("HTTPS_PROXY", "http://192.168.31.105:10809")
+        .output()
+        .expect("bash");
+    assert!(out.status.success(), "canary should have run: {out:?}");
+
+    let recorded = std::fs::read_to_string(&env_dump).expect("the stub must have run");
+    let seen: Vec<&str> = recorded.lines().collect();
+
+    for leaked in ["LD_PRELOAD=", "ALL_PROXY=", "http_proxy=", "HTTPS_PROXY="] {
+        assert!(
+            !seen.iter().any(|l| l.starts_with(leaked)),
+            "a local canary must not inherit `{leaked}`: sending a loopback health check \
+             through a proxy asks a different question, and under proxychains it fails \
+             outright.\nEnvironment seen:\n{recorded}"
+        );
+    }
+}
+
+/// The local canary must not depend on the Internet.
+///
+/// Resolving `example.com` to prove a *listener* works means upstream trouble fails the
+/// listener test. `localhost` is answered by EgressDNS itself from the special-use
+/// registry, so it proves binding, ACL admission, parsing, TCP framing and serialisation
+/// and nothing else.
+#[test]
+fn the_local_canary_uses_a_name_the_daemon_answers_itself() {
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
+        .expect("install.sh");
+    let start = script
+        .find("\nlocal_canaries() {")
+        .expect("install.sh must define local_canaries()");
+    let body = &script[start..];
+    let end = body.find("\n}\n").expect("terminated");
+    let local = &body[..end];
+
+    assert!(
+        local.contains("localhost"),
+        "local ingress must be proven with a locally answered name:\n{local}"
+    );
+    assert!(
+        !local.contains("example.com"),
+        "a local listener test must not depend on a public name:\n{local}"
+    );
+}
+
+/// A failed canary must say why.
+///
+/// The original discarded stdout and stderr, so an operator saw "did not return a usable
+/// answer" and had nothing to act on.
+#[test]
+fn a_failing_canary_reports_the_reason_rather_than_discarding_it() {
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
+        .expect("install.sh");
+    let start = script.find("\ncanary() {").expect("canary()");
+    let body = &script[start..];
+    let end = body.find("\n}\n").expect("terminated");
+    let canary = &body[..end];
+
+    assert!(
+        !canary.contains(">/dev/null 2>&1"),
+        "the canary must not discard the reason it failed:\n{canary}"
+    );
+    assert!(
+        canary.contains("--json"),
+        "the canary should capture a structured result it can report:\n{canary}"
+    );
+}
