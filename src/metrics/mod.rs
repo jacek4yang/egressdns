@@ -71,6 +71,15 @@ pub mod names {
     pub const DNSSEC_INFLIGHT: &str = "egressdns_dnssec_validations_inflight";
     /// DNSSEC validations shed because the concurrency ceiling was reached.
     pub const DNSSEC_SHED_TOTAL: &str = "egressdns_dnssec_validations_shed_total";
+    /// Validation outcomes, by typed outcome.
+    pub const DNSSEC_OUTCOME_TOTAL: &str = "egressdns_dnssec_outcome_total";
+    /// Validations retried because the first attempt failed for a reason of ours.
+    pub const DNSSEC_VALIDATION_FALLBACK_TOTAL: &str = "egressdns_dnssec_validation_fallback_total";
+    /// Answers served with AD cleared because the proof could not be completed in time.
+    pub const DNSSEC_INDETERMINATE_SERVED_TOTAL: &str =
+        "egressdns_dnssec_indeterminate_served_total";
+    /// Background proof completions started.
+    pub const DNSSEC_PROOF_COMPLETION_TOTAL: &str = "egressdns_dnssec_proof_completion_total";
     /// Probe workers currently executing a job.
     pub const PROBE_WORKERS_ACTIVE: &str = "egressdns_probe_workers_active";
     /// UDP answers that were truncated and retried over a stream transport.
@@ -232,6 +241,22 @@ fn describe() {
     );
     describe_gauge!(names::UPSTREAM_INFLIGHT, "Upstream exchanges in flight");
     describe_gauge!(names::DNSSEC_INFLIGHT, "DNSSEC validations in flight");
+    describe_counter!(
+        names::DNSSEC_OUTCOME_TOTAL,
+        "DNSSEC validation outcomes, labelled by typed outcome"
+    );
+    describe_counter!(
+        names::DNSSEC_VALIDATION_FALLBACK_TOTAL,
+        "DNSSEC validations retried after a transport or deadline failure"
+    );
+    describe_counter!(
+        names::DNSSEC_INDETERMINATE_SERVED_TOTAL,
+        "Answers served with AD cleared because the proof could not be completed"
+    );
+    describe_counter!(
+        names::DNSSEC_PROOF_COMPLETION_TOTAL,
+        "Background DNSSEC proof completions started"
+    );
     describe_counter!(
         names::DNSSEC_SHED_TOTAL,
         "DNSSEC validations shed at the concurrency ceiling"
