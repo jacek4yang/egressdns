@@ -136,6 +136,13 @@ pub struct Resolver {
     pub cloudflare: SharedCloudflare,
     /// Address quality evidence.
     pub quality: Arc<QualityStore>,
+    /// Which names are known to be web services.
+    ///
+    /// Gates every use of port-443 evidence. Without it, an answer for an SSH host or a
+    /// mail exchanger would be ranked by how well its addresses complete a TLS handshake
+    /// on a port they do not serve, and every address in every answer would receive an
+    /// unsolicited connection.
+    pub services: crate::ranking::service::SharedServiceClassifier,
     /// Hot-name tracking.
     pub hotset: SharedHotSet,
     /// Probe work queue.
@@ -169,6 +176,7 @@ impl Resolver {
         network: SharedNetworkState,
         cloudflare: SharedCloudflare,
         quality: Arc<QualityStore>,
+        services: crate::ranking::service::SharedServiceClassifier,
         hotset: SharedHotSet,
         probes: ProbeQueue,
         roots: Arc<RootCertStore>,
@@ -226,6 +234,7 @@ impl Resolver {
             network,
             cloudflare,
             quality,
+            services,
             hotset,
             probes,
             roots,
@@ -1060,7 +1069,20 @@ impl Resolver {
         if !self.config.probe.enabled || entry.kind != EntryKind::Positive {
             return;
         }
+        // An HTTPS or SVCB answer is the protocol saying "this name is a service": note
+        // it, so the A and AAAA answers for the same name become rankable.
+        if crate::ranking::service::is_service_binding(key.qtype)
+            && !entry.message.answers.is_empty()
+        {
+            self.services.note_https(&key.name);
+        }
         if !matches!(key.qtype, RecordType::A | RecordType::AAAA) {
+            return;
+        }
+        // Port 443 is probed only where there is protocol evidence that something is
+        // listening on it. Otherwise the measurement is noise and the connection is
+        // unsolicited.
+        if !self.services.is_web_service(&key.name) {
             return;
         }
         let snapshot = self.cloudflare.prefixes();
@@ -1122,7 +1144,15 @@ impl Resolver {
         let qname = request.queries[0].name().to_string();
 
         let addresses = collect_addresses(&message, qtype);
-        let quality = self.quality.snapshot_for(&addresses, 443, &qname);
+        // Same rule on the read side: an answer with no service evidence is passed
+        // through in the order the authority gave it, because port-443 measurements say
+        // nothing about a name that is not an HTTPS service.
+        let is_web = self.services.is_web_service(&qname);
+        let quality = if is_web {
+            self.quality.snapshot_for(&addresses, 443, &qname)
+        } else {
+            Default::default()
+        };
         let snapshot = self.cloudflare.prefixes();
         let now_unix = crate::util::time::SystemClock.unix_secs_now();
         // One coherent policy generation for this answer: `enabled` and the configured

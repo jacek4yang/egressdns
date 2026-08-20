@@ -65,6 +65,9 @@ pub struct App {
     pub singleflight: Arc<SingleFlight<CacheKey, Arc<CacheEntry>>>,
     /// Address quality evidence.
     pub quality: Arc<QualityStore>,
+    /// Which names are known to be web services. Long-lived learned state, so it is owned
+    /// by the process rather than rebuilt from configuration on every reload.
+    pub services: crate::ranking::service::SharedServiceClassifier,
     /// Hot-name tracking.
     pub hotset: SharedHotSet,
     /// Dataset snapshots.
@@ -121,6 +124,9 @@ impl App {
         let singleflight =
             SingleFlight::new(64, (config.resources.max_inflight_queries / 64).max(64));
         let quality = Arc::new(QualityStore::new(config.cache.quality_max_entries as usize));
+        let services: crate::ranking::service::SharedServiceClassifier = Arc::new(
+            crate::ranking::service::ServiceClassifier::new(config.prefetch.hot_set_size),
+        );
         let hotset: SharedHotSet = Arc::new(HotSet::new(
             config.prefetch.hot_set_size,
             600.0,
@@ -170,6 +176,7 @@ impl App {
             Arc::clone(&network),
             Arc::clone(&cloudflare),
             Arc::clone(&quality),
+            Arc::clone(&services),
             Arc::clone(&hotset),
             probes.clone(),
             Arc::clone(&upstream_slots),
@@ -181,6 +188,7 @@ impl App {
             cache,
             singleflight,
             quality,
+            services,
             hotset,
             datasets,
             network,
@@ -215,6 +223,7 @@ impl App {
         network: SharedNetworkState,
         cloudflare: SharedCloudflare,
         quality: Arc<QualityStore>,
+        services: crate::ranking::service::SharedServiceClassifier,
         hotset: SharedHotSet,
         probes: ProbeQueue,
         upstream_slots: Arc<Semaphore>,
@@ -264,6 +273,7 @@ impl App {
             network,
             cloudflare,
             quality,
+            services,
             hotset,
             probes,
             Arc::clone(&roots),
@@ -306,6 +316,7 @@ impl App {
             Arc::clone(&self.network),
             Arc::clone(&self.cloudflare),
             Arc::clone(&self.quality),
+            Arc::clone(&self.services),
             Arc::clone(&self.hotset),
             self.probes.clone(),
             Arc::clone(&self.upstream_slots),
@@ -392,6 +403,7 @@ impl App {
             Arc::clone(&self.network),
             Arc::clone(&self.cloudflare),
             Arc::clone(&self.quality),
+            Arc::clone(&self.services),
             Arc::clone(&self.hotset),
             self.probes.clone(),
             Arc::clone(&self.upstream_slots),

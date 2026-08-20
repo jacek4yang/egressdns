@@ -8,6 +8,7 @@
 //!    that address, and nothing else. It can never make an ordinary DNS answer disappear.
 
 pub mod model;
+pub mod service;
 pub mod store;
 
 pub use model::{Confidence, ObservationClass, QualityStats};

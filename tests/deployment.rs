@@ -134,3 +134,89 @@ fn the_systemd_unit_does_not_stop_another_resolver() {
         );
     }
 }
+
+/// A DNS answer is not a claim that anything listens on port 443.
+///
+/// Ranking every A and AAAA answer by HTTPS quality measures the wrong thing for an SSH
+/// host, a mail exchanger or a game server — every address scores identically badly, so
+/// the ordering is noise — and it sends an unsolicited connection to every address in
+/// every answer, which for a resolver handling arbitrary client traffic is a lot of
+/// hosts that never asked.
+///
+/// Port-443 evidence is therefore gathered only where the protocol says the name is a
+/// service: an HTTPS or SVCB record.
+#[tokio::test]
+async fn a_name_with_no_service_evidence_is_not_probed_on_port_443() {
+    let handler = MockUpstream::new();
+    handler.set(
+        "ssh.example.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![
+            a("ssh.example.test.", 300, "203.0.113.40"),
+            a("ssh.example.test.", 300, "203.0.113.41"),
+        ]),
+    );
+    let ca = TestCa::new();
+    let servers = common::start_mock(handler, &ca, "dns.example.test", Transports::plain()).await;
+    let upstream = servers.udp.expect("udp");
+    std::mem::forget(servers);
+
+    // Probing on, so the only thing stopping a probe is the absence of service evidence.
+    let fragment = format!(
+        r#"
+upstreams = ["{upstream}"]
+proxies = []
+
+[dnssec]
+mode = "off"
+
+[probe]
+enabled = true
+
+[prefetch]
+enabled = false
+"#
+    );
+    let daemon = Daemon::start(&fragment).await;
+
+    let response = daemon
+        .query_udp(&common::query("ssh.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+
+    assert!(
+        !daemon.app.services.is_web_service("ssh.example.test"),
+        "an A answer alone must not classify a name as a web service"
+    );
+    assert_eq!(
+        daemon.app.probes.depth(),
+        0,
+        "no port-443 probe may be scheduled for a name with no service evidence"
+    );
+}
+
+/// An HTTPS record is the protocol saying "this name is a service", and it is what makes
+/// port-443 measurement meaningful.
+#[tokio::test]
+async fn an_https_record_makes_a_name_eligible_for_service_evidence() {
+    let handler = MockUpstream::new();
+    handler.set(
+        "web.example.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("web.example.test.", 300, "203.0.113.42")]),
+    );
+    let ca = TestCa::new();
+    let servers = common::start_mock(handler, &ca, "dns.example.test", Transports::plain()).await;
+    let upstream = servers.udp.expect("udp");
+    std::mem::forget(servers);
+
+    let daemon = Daemon::start(&common::udp_upstream_fragment(upstream)).await;
+
+    assert!(!daemon.app.services.is_web_service("web.example.test"));
+    // Observing a service binding is what changes the classification.
+    daemon.app.services.note_https("web.example.test.");
+    assert!(
+        daemon.app.services.is_web_service("web.example.test"),
+        "an HTTPS record must make the name eligible"
+    );
+}
