@@ -827,3 +827,79 @@ records = [{ name = "nas.home.arpa.", rtype = "A", value = "192.168.1.10" }]
     assert_eq!(r.answers.len(), 1, "operator configuration must win");
     assert_eq!(handler.query_count(), 0);
 }
+
+/// Background validation must not destroy an answer it could not finish checking.
+///
+/// A validation run against an upstream that supplies no chain of trust - a gateway
+/// forwarder, a response with the records stripped, the in-process mock here - ends with
+/// hickory stamping the records `Bogus`, because "I asked for the DS and got no proof
+/// either way" and "the signature is wrong" surface the same way. The evidence plane's
+/// contract is that only a validation by an upstream that actually returns DNSSEC
+/// records may remove data. If this test fails, a DNSSEC-incapable upstream can churn
+/// the cache for every unsigned name: served once, evicted, re-fetched forever.
+///
+/// The observable is upstream query counts. The validator always re-queries the A
+/// record itself, so after the first client query and its background validation the
+/// mock has seen the name twice; a second client query is then a cache hit (count stays
+/// 2). An eviction forces a re-fetch (count 3).
+#[tokio::test]
+async fn background_validation_keeps_answers_a_proofless_upstream_cannot_confirm() {
+    let handler = MockUpstream::new();
+    handler.set(
+        "cached.example.test.",
+        RecordType::A,
+        Behaviour::Answer(vec![a("cached.example.test.", 300, "203.0.113.44")]),
+    );
+    // DS and DNSKEY queries reach names the mock has no records for. An empty NOERROR is
+    // what a stripped or forwarding upstream produces; it gives the validator no proof.
+    handler.set_default(Behaviour::NoData { minimum: 60 });
+
+    // The default DNSSEC mode is `background`, so this fragment deliberately has no
+    // `[dnssec]` section: `udp_upstream_fragment` pins `off`, and this test exists for
+    // the background evidence path.
+    let ca = TestCa::new();
+    let servers = common::start_mock(
+        handler.clone(),
+        &ca,
+        "dns.example.test",
+        Transports {
+            udp: true,
+            tcp: true,
+            ..Transports::default()
+        },
+    )
+    .await;
+    let fragment = format!(
+        r#"
+upstreams = ["{}"]
+proxies = []
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#,
+        servers.udp.expect("mock udp")
+    );
+    let daemon = Daemon::start(&fragment).await;
+
+    let first = daemon
+        .query_udp(&common::query("cached.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(first.metadata.response_code, ResponseCode::NoError);
+
+    // Give the evidence plane time to run: it re-queries the A record and the chain
+    // lookups, and - before the fix - evicts the cached answer.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let second = daemon
+        .query_udp(&common::query("cached.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(second.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        handler.count_for("cached.example.test.", RecordType::A),
+        2,
+        "expected one client query plus one validator query; a third exchange means          background validation evicted an answer it merely could not finish checking"
+    );
+}
