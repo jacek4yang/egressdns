@@ -26,9 +26,13 @@ env:
 
 jobs:
   check:
-    name: Format, lint and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Format, lint and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -53,6 +57,25 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+      # The shipped configurations must validate on every supported platform, not only
+      # where they are usually deployed: the defaults, the validator and the path
+      # handling all differ.
+      - name: Validate the shipped configurations
+        run: |
+          foreach ($f in (Get-ChildItem config/*.toml)) {
+            ./target/release/egressdnsd --config $f.FullName --check-config
+          }
+        if: runner.os == 'Windows'
+        shell: pwsh
+
+      - name: Validate the shipped configurations
+        run: |
+          for f in config/*.toml; do
+            ./target/release/egressdnsd --config "$f" --check-config
+          done
+        if: runner.os == 'Linux'
+        shell: bash
 
   supply-chain:
     name: Advisories, licences and bans

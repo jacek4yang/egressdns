@@ -27,7 +27,7 @@ struct Cli {
         long,
         global = true,
         env = "EGRESSDNS_ADMIN_SOCKET",
-        default_value = "/run/egressdns/admin.sock"
+        default_value = egressdns::platform::DEFAULT_ADMIN_ENDPOINT
     )]
     socket: PathBuf,
 
@@ -38,7 +38,7 @@ struct Cli {
         long,
         global = true,
         env = "EGRESSDNS_CONFIG",
-        default_value = "/etc/egressdns/config.toml"
+        default_value = egressdns::platform::DEFAULT_CONFIG_PATH
     )]
     config: PathBuf,
 
@@ -134,6 +134,52 @@ enum Command {
     Cloudflare(CloudflareCommand),
     /// Print the effective configuration with secrets redacted.
     DumpEffectiveConfig,
+    /// Measure real DNS latency against real resolvers.
+    ///
+    /// Sends actual queries from this host — to `223.5.5.5`, a regional public resolver,
+    /// or a running EgressDNS — and reports success rate, useful-answer rate and the
+    /// latency distribution per resolver. This is the comparison the product claims to
+    /// win; Criterion benchmarks cannot answer it.
+    Bench {
+        /// Resolvers to compare, as `host[:port]` specs. Repeatable.
+        #[arg(long = "server", short = 's', default_values_t = bench_default_servers())]
+        servers: Vec<String>,
+
+        /// Extra names to measure, beyond the built-in corpus. Repeatable.
+        #[arg(long = "name")]
+        names: Vec<String>,
+
+        /// Replace the built-in corpus with a name-per-line file.
+        #[arg(long)]
+        names_file: Option<PathBuf>,
+
+        /// Cold (first query per name) rounds.
+        #[arg(long, default_value_t = 1)]
+        cold_rounds: usize,
+
+        /// Warm (repeated query per name) rounds.
+        #[arg(long, default_value_t = 5)]
+        warm_rounds: usize,
+
+        /// Maximum concurrent queries per server.
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+
+        /// Per-query timeout in milliseconds.
+        #[arg(long, default_value_t = 3_000)]
+        timeout_ms: u64,
+
+        /// Write the full report as JSON to this path. (`--json` is the global
+        /// machine-readable rendering switch, so the file output gets its own name.)
+        #[arg(long = "json-out")]
+        json_out: Option<PathBuf>,
+    },
+}
+
+/// The default comparison set: the project's reference baseline plus one encrypted
+/// independent resolver.
+fn bench_default_servers() -> Vec<String> {
+    vec![String::from("223.5.5.5"), String::from("1.1.1.1")]
 }
 
 /// Cloudflare sub-commands.
@@ -289,6 +335,31 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             *dnssec,
             *require_answer,
             *wait,
+            cli.json,
+        )
+        .await;
+    }
+
+    if let Command::Bench {
+        servers,
+        names,
+        names_file,
+        cold_rounds,
+        warm_rounds,
+        concurrency,
+        timeout_ms,
+        json_out,
+    } = &cli.command
+    {
+        return run_bench(
+            servers,
+            names,
+            names_file.as_deref(),
+            *cold_rounds,
+            *warm_rounds,
+            *concurrency,
+            *timeout_ms,
+            json_out.as_deref(),
             cli.json,
         )
         .await;
@@ -477,6 +548,8 @@ fn encode(command: &Command) -> (String, Vec<String>) {
         Command::ReloadContract => ("reload-contract".into(), vec![]),
         Command::Builtins { .. } => ("builtins".into(), vec![]),
         Command::Reload => ("reload".into(), vec![]),
+        // Answered locally before this point is reached; never sent to the daemon.
+        Command::Bench { .. } => ("bench".into(), vec![]),
         Command::Upstreams => ("upstreams".into(), vec![]),
         Command::Network => ("network".into(), vec![]),
         Command::CacheStats => ("cache-stats".into(), vec![]),
@@ -507,6 +580,106 @@ fn encode(command: &Command) -> (String, Vec<String>) {
             ("cloudflare".into(), args)
         }
     }
+}
+
+/// Measure real resolvers from this host and render the comparison.
+#[allow(clippy::too_many_arguments)]
+async fn run_bench(
+    servers: &[String],
+    extra_names: &[String],
+    names_file: Option<&std::path::Path>,
+    cold_rounds: usize,
+    warm_rounds: usize,
+    concurrency: usize,
+    timeout_ms: u64,
+    json_out: Option<&std::path::Path>,
+    json: bool,
+) -> Result<ExitCode> {
+    use egressdns::bench;
+
+    let mut names: Vec<String> = match names_file {
+        Some(path) => {
+            let body = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            body.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        }
+        None => bench::DEFAULT_CORPUS
+            .iter()
+            .map(|s| String::from(*s))
+            .collect(),
+    };
+    for name in extra_names {
+        let name = name.trim().to_string();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        anyhow::bail!("no names to measure");
+    }
+    if servers.is_empty() {
+        anyhow::bail!("no servers to measure");
+    }
+
+    let request = bench::BenchRequest {
+        servers: servers.to_vec(),
+        names,
+        timeout: Duration::from_millis(timeout_ms.clamp(50, 60_000)),
+        concurrency: concurrency.clamp(1, 256),
+        cold_rounds: cold_rounds.min(64),
+        warm_rounds: warm_rounds.min(512),
+    };
+    let report = bench::run(request).await;
+
+    if let Some(path) = json_out {
+        let text = serde_json::to_string_pretty(&report)?;
+        std::fs::write(path, text + "\n").with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "DNS latency benchmark — {} name(s), cold {} round(s), warm {} round(s), {}ms timeout\n",
+        report.names.len(),
+        cold_rounds,
+        warm_rounds,
+        report.timeout_ms
+    );
+    println!(
+        "{:<24} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "SERVER", "USEFUL", "TIMEOUT", "P50_MS", "P90_MS", "P95_MS", "P99_MS", "MAX_MS", "MEAN_MS"
+    );
+    for server in &report.servers {
+        for (label, workload) in [("cold", &server.cold), ("warm", &server.warm)] {
+            let lat = &workload.latency;
+            println!(
+                "{:<24} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+                format!("{}/{}", truncate(&server.server, 21), label),
+                format!("{}/{}", workload.useful, workload.queries),
+                workload.timeouts,
+                format!("{:.1}", lat.p50_ms),
+                format!("{:.1}", lat.p90_ms),
+                format!("{:.1}", lat.p95_ms),
+                format!("{:.1}", lat.p99_ms),
+                format!("{:.1}", lat.max_ms),
+                format!("{:.1}", lat.mean_ms),
+            );
+        }
+    }
+    println!(
+        "\nUSEFUL is NOERROR answers with an address out of all queries. \
+              warm measures whichever caching layer sits in front of the name."
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn render(command: &Command, response: &Response) {

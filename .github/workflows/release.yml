@@ -10,9 +10,9 @@ on:
         description: Tag to build and publish
         required: true
 
-# `contents: write` is needed to create the release. Nothing else is granted, and no
-# third-party action runs in this workflow, so the token is only ever handed to the
-# GitHub CLI.
+# `contents: write` is needed only by the publishing job. Build jobs get read-only
+# tokens, and no third-party action runs anywhere, so nothing executes with more than
+# the token it needs.
 permissions:
   contents: read
 
@@ -20,12 +20,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build and publish
+  # Each platform builds in a job that could publish nothing on its own; artifacts are
+  # gathered and checksummed in `publish`, so a partially failed platform can never
+  # produce a half-populated release.
+  build-linux:
+    name: Build Linux artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -42,17 +43,14 @@ jobs:
             exit 1
           fi
           # The tag must match the version in Cargo.toml, or the release archive would
-          # advertise a version the binary does not report.
-          #
-          # A pre-release suffix is allowed: SemVer calls v2.0.0-rc1 a pre-release of
-          # 2.0.0, and the release policy in docs/ requires candidates to be published
-          # that way. Requiring exact equality made that policy unimplementable — the
-          # first attempt to tag v2.0.0-rc1 was rejected here.
+          # advertise a version the binary does not report. A pre-release suffix is
+          # allowed: SemVer calls v4.0.0-rc.1 a pre-release of 4.0.0, and release
+          # candidates are published that way.
           CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           case "$TAG" in
             "v${CARGO_VERSION}")
               PRERELEASE=0 ;;
-            "v${CARGO_VERSION}-"*)
+            "v${CARGO_VERSION}-"* )
               PRERELEASE=1 ;;
             *)
               echo "tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}" >&2
@@ -71,10 +69,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # Both targets are built in one job so the artifacts never leave the runner. The
-      # upload/download-artifact round trip this replaced widened the trust boundary for
-      # no benefit at this scale.
-      - name: Build every target
+      # Both targets are built in one job so the artifacts never leave the runner until
+      # they are complete archives.
+      - name: Build every Linux target
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
@@ -92,7 +89,7 @@ jobs:
           # Compared against the Cargo.toml version, not the tag: a pre-release tag
           # carries a suffix the binary does not and should not report.
           case "$REPORTED" in
-            *"${{ steps.tag.outputs.version }}"*) ;;
+            *" ${{ steps.tag.outputs.version }}"*) ;;
             *) echo "binary does not report version ${{ steps.tag.outputs.version }}" >&2
                exit 1 ;;
           esac
@@ -123,8 +120,133 @@ jobs:
                 -czf "$ARCHIVE" "$STAGE"
             rm -rf "$STAGE"
           done
+          sha256sum dist/egressdns-*-linux-*.tar.gz
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-artifacts
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
+  build-windows:
+    name: Build Windows artifacts
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve the tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $tag = '${{ github.event.inputs.tag }}'
+          }
+          if (-not $tag) { throw "no tag to release" }
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$').Matches[0].Groups[1].Value
+          if ($tag -eq "v$cargoVersion") {
+            $prerelease = 0
+          } elseif ($tag -like "v$cargoVersion-*") {
+            $prerelease = 1
+          } else {
+            throw "tag $tag does not match Cargo.toml version $cargoVersion"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$cargoVersion" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Verify the built binary reports the tagged version
+        shell: pwsh
+        run: |
+          $reported = & ./target/x86_64-pc-windows-msvc/release/egressdnsd.exe --version
+          Write-Host $reported
+          if ($reported -notlike "* ${{ steps.tag.outputs.version }}*") {
+            throw "binary does not report version ${{ steps.tag.outputs.version }}"
+          }
+
+      # A first run of the release binary on the runner doubles as a smoke test: config
+      # validation must succeed with the shipped example before it is allowed to ship.
+      - name: Validate the shipped configuration
+        run: ./target/x86_64-pc-windows-msvc/release/egressdnsd.exe --config config/egressdns.toml --check-config
+
+      - name: Stage the release archive
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stage = "egressdns"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/egressdnsd.exe $stage/
+          Copy-Item target/x86_64-pc-windows-msvc/release/egressdnsctl.exe $stage/
+          Copy-Item packaging/windows/install.ps1 $stage/
+          Copy-Item packaging/windows/upgrade.ps1 $stage/
+          Copy-Item packaging/windows/uninstall.ps1 $stage/
+          Copy-Item config/egressdns.toml $stage/
+          Copy-Item LICENSE-MIT, LICENSE-APACHE $stage/
+          Copy-Item docs/INSTALL-WINDOWS.md $stage/
+          $archive = "dist/egressdns-$tag-windows-x86_64.zip"
+          Compress-Archive -Path $stage -DestinationPath $archive
+          Remove-Item -Recurse -Force $stage
+          Get-FileHash $archive -Algorithm SHA256 | Format-List
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-artifacts
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish the release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Determine the tag
+        id: tag
+        run: |
+          set -Eeuo pipefail
+          TAG="${GITHUB_REF_NAME:-}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no tag to release" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums cover every artifact
+        run: |
+          set -Eeuo pipefail
+          ls -la dist/
+          # One checksum file for the whole release, generated from the bytes that are
+          # about to be published rather than per-platform at build time.
           cd dist
-          sha256sum egressdns-*-linux-*.tar.gz > SHA256SUMS
+          sha256sum egressdns-*.tar.gz egressdns-*.zip > SHA256SUMS
           cat SHA256SUMS
 
       # `gh` is preinstalled on GitHub-hosted runners, so publishing needs no third-party
@@ -136,14 +258,20 @@ jobs:
         run: |
           set -Eeuo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
+          # Recompute the pre-release flag from Cargo.toml, exactly as the build jobs
+          # validated it: a suffix like -rc.1 makes this a pre-release.
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          PRERELEASE_FLAG=""
+          case "$TAG" in
+            "v${CARGO_VERSION}-"*) PRERELEASE_FLAG="--prerelease" ;;
+            "v${CARGO_VERSION}") ;;
+            *) echo "tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}" >&2
+               exit 1 ;;
+          esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release ${TAG} already exists; uploading assets only"
             gh release upload "$TAG" dist/* --clobber
           else
-            PRERELEASE_FLAG=""
-            if [ "${{ steps.tag.outputs.prerelease }}" = "1" ]; then
-              PRERELEASE_FLAG="--prerelease"
-            fi
             # shellcheck disable=SC2086
             gh release create "$TAG" \
               --title "EgressDNS ${TAG}" \

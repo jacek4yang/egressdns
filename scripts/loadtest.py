@@ -114,7 +114,16 @@ class Results:
 
 
 class ProcSampler(threading.Thread):
-    """Sample RSS, file descriptors and thread count from /proc while the test runs."""
+    """Sample RSS, file descriptors and thread count while the test runs.
+
+    Linux reads `/proc/<pid>`. Windows uses the process API through `ctypes`: RSS from
+    `GetProcessMemoryInfo`, the open-handle count from `GetProcessHandleCount` (a handle
+    count is not a descriptor count, but it answers the same leak question), and CPU time
+    from `GetProcessTimes`. Windows cannot report a thread count without extra
+    privileges, so it is recorded as 0 there and the report notes the platform.
+    """
+
+    IS_WINDOWS = os.name == "nt"
 
     def __init__(self, pid: int, interval: float = 1.0) -> None:
         super().__init__(daemon=True)
@@ -122,8 +131,13 @@ class ProcSampler(threading.Thread):
         self.interval = interval
         self.samples: list[dict[str, float]] = []
         self.stop_event = threading.Event()
+        self._process = None  # Windows: HANDLE kept open for the duration.
 
     def run(self) -> None:
+        if self.IS_WINDOWS:
+            self._process = self._open_windows_process()
+            if self._process is None:
+                return
         while not self.stop_event.is_set():
             sample = self.sample()
             if sample is None:
@@ -131,7 +145,73 @@ class ProcSampler(threading.Thread):
             self.samples.append(sample)
             self.stop_event.wait(self.interval)
 
+    # --- Windows ------------------------------------------------------------------
+
+    def _open_windows_process(self) -> "ctypes.WinDLL | None":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, self.pid)
+        return handle if handle else None
+
+    def _sample_windows(self) -> dict[str, float] | None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        api_ms = ctypes.WinDLL("api_ms_win_psapi_l1_1_0")
+        handle = self._process
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(pmc)
+        if not api_ms.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return None
+        handle_count = wintypes.DWORD(0)
+        if not kernel32.GetProcessHandleCount(handle, ctypes.byref(handle_count)):
+            return None
+        creation = wintypes.FILETIME()
+        exit_t = wintypes.FILETIME()
+        kernel_t = wintypes.FILETIME()
+        user_t = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_t),
+            ctypes.byref(kernel_t),
+            ctypes.byref(user_t),
+        ):
+            return None
+        # Kernel and user time arrive as 100-nanosecond FILETIME units.
+        cpu_ticks = kernel_t.dwHighDateTime << 32 | kernel_t.dwLowDateTime
+        cpu_ticks += user_t.dwHighDateTime << 32 | user_t.dwLowDateTime
+        return {
+            "t": time.monotonic(),
+            "rss_mb": pmc.WorkingSetSize / (1024.0 * 1024.0),
+            "fds": float(handle_count.value),
+            "threads": 0.0,  # Not available unprivileged on Windows.
+            "cpu_ticks": float(cpu_ticks),
+        }
+
+    # --- Linux --------------------------------------------------------------------
+
     def sample(self) -> dict[str, float] | None:
+        if self.IS_WINDOWS:
+            return self._sample_windows()
         base = f"/proc/{self.pid}"
         try:
             with open(f"{base}/status", encoding="ascii") as fh:
@@ -341,8 +421,10 @@ def main() -> int:
     if sampler and sampler.samples:
         first, last = sampler.samples[0], sampler.samples[-1]
         span = max(1e-9, last["t"] - first["t"])
-        ticks_per_sec = os.sysconf("SC_CLK_TCK")
+        # Linux CPU time is measured in clock ticks; Windows FILETIME units are 100 ns.
+        ticks_per_sec = 10_000_000 if os.name == "nt" else os.sysconf("SC_CLK_TCK")
         report["process"] = {
+            "platform": "windows" if os.name == "nt" else "linux",
             "samples": len(sampler.samples),
             "rss_mb_start": round(first["rss_mb"], 1),
             "rss_mb_end": round(last["rss_mb"], 1),

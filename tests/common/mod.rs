@@ -270,7 +270,12 @@ pub fn soa_record(name: &str, minimum: u32) -> Record {
 
 fn apex_of(name: &str) -> Name {
     let n = normalise(name);
-    let labels: Vec<&str> = n.trim_end_matches('.').split('.').collect();
+    let trimmed = n.trim_end_matches('.');
+    // The root has no labels; its SOA uses the conventional root mname.
+    if trimmed.is_empty() {
+        return Name::from_utf8(String::from("a.root-servers.net.")).expect("root apex name");
+    }
+    let labels: Vec<&str> = trimmed.split('.').collect();
     let apex = if labels.len() > 2 {
         labels[labels.len() - 2..].join(".")
     } else {
@@ -632,6 +637,9 @@ impl Daemon {
         egressdns::tls::install_crypto_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("egressdns.toml");
+        // Forward slashes keep the path a valid TOML basic string on Windows, where
+        // backslashes would otherwise read as escape sequences.
+        let state_dir = dir.path().to_string_lossy().replace('\\', "/");
         // The fragment comes first: `upstreams` and `proxies` are top-level keys, and
         // TOML requires those to precede every table.
         let preamble = format!(
@@ -651,7 +659,7 @@ enabled = false
 enabled = false
 path = "{}/state.sqlite3"
 "#,
-            dir.path().display()
+            state_dir
         );
         let text = format!("{fragment}\n{preamble}\n");
         std::fs::write(&config_path, &text).expect("write config");
@@ -799,6 +807,8 @@ path = "{}/state.sqlite3"
         // The listen addresses must match the original text exactly. The daemon really
         // did bind ephemeral ports, but the *configuration* still says `:0`, and the
         // reload contract correctly treats a changed listen address as restart-required.
+        // Forward slashes keep the path valid TOML on Windows.
+        let state_dir = self.dir.path().to_string_lossy().replace('\\', "/");
         let preamble = format!(
             r#"
 [server]
@@ -816,7 +826,7 @@ enabled = false
 enabled = false
 path = "{}/state.sqlite3"
 "#,
-            self.dir.path().display()
+            state_dir
         );
         // Fragment first: top-level keys must precede every table, matching `start_tuned`.
         let text = format!("{fragment}\n{preamble}\n");

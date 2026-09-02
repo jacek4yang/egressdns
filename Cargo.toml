@@ -48,7 +48,6 @@ ipnet = { version = "2", features = ["serde"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 moka = { version = "0.12", features = ["sync"] }
-nix = { version = "0.31", default-features = false, features = ["net", "user"] }
 parking_lot = "0.12"
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"] }
 rand = "0.10"
@@ -57,7 +56,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
-sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = { version = "0.6", features = ["all"] }
@@ -70,6 +68,28 @@ url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "json", "fmt", "std", "ansi", "tracing-log"] }
 webpki-roots = "1"
+
+# Unix-only system integration. `nix` provides getifaddrs(3)/geteuid(2) for host
+# inspection; `sd-notify` speaks the systemd readiness protocol. Windows equivalents live
+# behind safe wrapper crates in the target section below.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["net", "user", "fs"] }
+sd-notify = "0.5"
+
+# Windows-only system integration. Every crate here is a safe wrapper over the Win32 API so
+# the repository-wide `#![forbid(unsafe_code)]` holds on every platform.
+[target.'cfg(windows)'.dependencies]
+# Interface enumeration, default-route and gateway detection (GetAdaptersAddresses /
+# GetBestRoute / GetIpForwardTable2 internally).
+netdev = { version = "0.46", default-features = false, features = ["gateway"] }
+# Listening TCP/UDP socket enumeration with owning PIDs, for `doctor`'s port-conflict
+# report (GetExtendedTcpTable / GetExtendedUdpTable internally).
+netstat2 = "0.11"
+# Token-elevation query, the Windows analogue of `is_root`, for `doctor`'s advice.
+is_elevated = "0.1"
+# Service control manager integration, so `egressdnsd --service` can run under the Windows
+# service controller and `doctor` can query the service state.
+windows-service = "0.8"
 
 [dev-dependencies]
 async-trait = "0.1"

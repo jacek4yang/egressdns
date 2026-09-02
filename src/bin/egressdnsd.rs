@@ -10,6 +10,7 @@ use clap::Parser;
 use egressdns::config::Config;
 use egressdns::dns::server::{self, Ingress};
 use egressdns::runtime::App;
+use tokio::sync::watch;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -28,7 +29,7 @@ struct Cli {
         short,
         long,
         env = "EGRESSDNS_CONFIG",
-        default_value = "/etc/egressdns/config.toml"
+        default_value = egressdns::platform::DEFAULT_CONFIG_PATH
     )]
     config: PathBuf,
 
@@ -47,10 +48,35 @@ struct Cli {
     /// Emit newline-delimited JSON logs.
     #[arg(long)]
     json_logs: bool,
+
+    /// Run under the Windows service control manager.
+    ///
+    /// Not useful interactively: the process connects to the service controller, which
+    /// only exists for a process the service manager started. Installed as
+    /// `egressdnsd.exe --service --config <path>`.
+    #[cfg(windows)]
+    #[arg(long)]
+    service: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    #[cfg(windows)]
+    if cli.service {
+        return match service::dispatch() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("egressdnsd: cannot run as a Windows service: {e:#}");
+                eprintln!(
+                    "egressdnsd: this mode exists for the service control manager; \
+                     run without --service to use the console"
+                );
+                ExitCode::from(1)
+            }
+        };
+    }
+
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
@@ -61,6 +87,14 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
+    run_daemon(cli, None)
+}
+
+/// Load, validate and serve, shared by console mode and the Windows service dispatcher.
+///
+/// `stop` is the service-control-manager stop request on Windows; it is `None` in console
+/// mode, where shutdown comes from the console signal handlers instead.
+fn run_daemon(cli: Cli, stop: Option<watch::Receiver<bool>>) -> Result<ExitCode> {
     // The configuration is parsed before the runtime starts so that a bad file is a fast,
     // obvious failure rather than a half-started daemon.
     let config =
@@ -92,7 +126,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
     runtime.block_on(async move {
         let config = bootstrap(config).await?;
-        serve(cli, Arc::new(config)).await
+        serve(cli, Arc::new(config), stop).await
     })
 }
 
@@ -260,7 +294,11 @@ async fn bootstrap(config: Config) -> Result<Config> {
     Ok(config)
 }
 
-async fn serve(cli: Cli, config: Arc<Config>) -> Result<ExitCode> {
+async fn serve(
+    cli: Cli,
+    config: Arc<Config>,
+    mut stop: Option<watch::Receiver<bool>>,
+) -> Result<ExitCode> {
     let metrics_handle = if config.metrics.enabled {
         egressdns::metrics::install()
     } else {
@@ -353,6 +391,7 @@ async fn serve(cli: Cli, config: Arc<Config>) -> Result<ExitCode> {
     app.spawn_background();
     app.set_ready(true);
     notify_systemd_ready();
+    write_pidfile(&config);
     let watchdog = spawn_watchdog(&config, Arc::clone(&app));
 
     tracing::info!(
@@ -363,39 +402,66 @@ async fn serve(cli: Cli, config: Arc<Config>) -> Result<ExitCode> {
     );
 
     // ---- signals ---------------------------------------------------------------------
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .context("installing the SIGHUP handler")?;
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("installing the SIGTERM handler")?;
+    // Unix has SIGHUP for reload and SIGTERM for shutdown. Windows has neither; there the
+    // console handler reports Ctrl+C, and an installed service reports stop through the
+    // service control manager via `stop`. Reload on Windows is `egressdnsctl reload`.
+    #[cfg(unix)]
+    {
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .context("installing the SIGHUP handler")?;
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("installing the SIGTERM handler")?;
 
-    loop {
-        tokio::select! {
-            _ = sighup.recv() => {
-                tracing::info!(event = "reload.requested");
-                match app.reload() {
-                    Ok(()) => tracing::info!(event = "reload.applied"),
-                    Err(e) => tracing::error!(
-                        event = "reload.rejected",
-                        error = %e,
-                        "keeping the running configuration"
-                    ),
+        loop {
+            tokio::select! {
+                _ = sighup.recv() => {
+                    tracing::info!(event = "reload.requested");
+                    match app.reload() {
+                        Ok(()) => tracing::info!(event = "reload.applied"),
+                        Err(e) => tracing::error!(
+                            event = "reload.rejected",
+                            error = %e,
+                            "keeping the running configuration"
+                        ),
+                    }
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!(event = "shutdown.requested", signal = "SIGTERM");
+                    break;
+                }
+                _ = stop_requested(&mut stop) => {
+                    tracing::info!(event = "shutdown.requested", source = "service-control");
+                    break;
+                }
+                r = tokio::signal::ctrl_c() => {
+                    if r.is_ok() {
+                        tracing::info!(event = "shutdown.requested", signal = "SIGINT");
+                    }
+                    break;
                 }
             }
-            _ = sigterm.recv() => {
-                tracing::info!(event = "shutdown.requested", signal = "SIGTERM");
-                break;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // No reload signal on Windows: both events end the process, so a single select
+        // suffices. `stop_requested` never resolves in console mode, where only Ctrl+C
+        // (or closing the console) shuts the daemon down.
+        tokio::select! {
+            _ = stop_requested(&mut stop) => {
+                tracing::info!(event = "shutdown.requested", source = "service-control");
             }
             r = tokio::signal::ctrl_c() => {
                 if r.is_ok() {
-                    tracing::info!(event = "shutdown.requested", signal = "SIGINT");
+                    tracing::info!(event = "shutdown.requested", signal = "CTRL_C");
                 }
-                break;
             }
         }
     }
 
     // ---- graceful shutdown -----------------------------------------------------------
     notify_systemd_stopping();
+    remove_pidfile(&config);
     app.set_ready(false);
     if let Some(handle) = watchdog {
         handle.abort();
@@ -430,9 +496,29 @@ async fn serve(cli: Cli, config: Arc<Config>) -> Result<ExitCode> {
 /// How long graceful shutdown waits for background tasks before aborting them.
 ///
 /// systemd's default `TimeoutStopSec` is 90 s; staying well inside it means the unit is
-/// stopped by our own bounded wait rather than by `SIGKILL`.
+/// stopped by our own bounded wait rather than by `SIGKILL`. The Windows service is
+/// registered with a matching stop timeout.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Resolve when the service control manager asks the daemon to stop.
+///
+/// In console mode `stop` is `None` and this future never resolves, so it costs a branch
+/// and nothing else.
+async fn stop_requested(stop: &mut Option<watch::Receiver<bool>>) {
+    match stop {
+        Some(rx) => {
+            if *rx.borrow() {
+                return;
+            }
+            // `changed` returning Err means the sender is gone, which can only be the
+            // service dispatcher ending; treat it as a stop request rather than spinning.
+            let _ = rx.changed().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(unix)]
 fn spawn_watchdog(config: &Config, app: Arc<App>) -> Option<tokio::task::JoinHandle<()>> {
     if !config.resources.systemd_watchdog {
         return None;
@@ -459,6 +545,14 @@ fn spawn_watchdog(config: &Config, app: Arc<App>) -> Option<tokio::task::JoinHan
     }))
 }
 
+#[cfg(not(unix))]
+fn spawn_watchdog(_config: &Config, _app: Arc<App>) -> Option<tokio::task::JoinHandle<()>> {
+    // The systemd watchdog protocol does not exist off Unix; `resources.systemd_watchdog`
+    // is accepted and ignored there rather than made a second platform-specific field.
+    None
+}
+
+#[cfg(unix)]
 fn notify_systemd_ready() {
     let _ = sd_notify::notify(&[
         sd_notify::NotifyState::Ready,
@@ -466,9 +560,157 @@ fn notify_systemd_ready() {
     ]);
 }
 
+#[cfg(not(unix))]
+fn notify_systemd_ready() {}
+
+#[cfg(unix)]
 fn notify_systemd_stopping() {
     let _ = sd_notify::notify(&[
         sd_notify::NotifyState::Stopping,
         sd_notify::NotifyState::Status("shutting down"),
     ]);
+}
+
+#[cfg(not(unix))]
+fn notify_systemd_stopping() {}
+
+/// Publish this process id next to the state database, so `doctor` can tell the running
+/// EgressDNS apart from a foreign resolver on Windows, where sockets cannot be mapped to
+/// process names without elevation.
+#[cfg(windows)]
+fn write_pidfile(config: &Config) {
+    let path = pidfile_path(config);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{}\n", std::process::id()));
+}
+
+#[cfg(not(windows))]
+fn write_pidfile(_config: &Config) {}
+
+#[cfg(windows)]
+fn remove_pidfile(config: &Config) {
+    let _ = std::fs::remove_file(pidfile_path(config));
+}
+
+#[cfg(not(windows))]
+fn remove_pidfile(_config: &Config) {}
+
+#[cfg(windows)]
+fn pidfile_path(config: &Config) -> PathBuf {
+    config
+        .storage
+        .path
+        .parent()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(egressdns::platform::state_dir)
+        .join("egressdnsd.pid")
+}
+
+/// Windows service integration.
+///
+/// The service controller starts `egressdnsd.exe --service --config <path>`. The
+/// dispatcher connects to the SCM, reports progress, and translates the controller's stop
+/// request into the same watch channel the console path uses for SIGTERM.
+#[cfg(windows)]
+mod service {
+    use std::ffi::OsString;
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use clap::Parser as _;
+    use windows_service::define_windows_service;
+    use windows_service::service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    };
+    use windows_service::service_control_handler::{
+        self, ServiceControlHandlerResult, ServiceStatusHandle,
+    };
+    use windows_service::service_dispatcher;
+
+    /// Registered service name, used by `sc.exe`, `doctor` and the install scripts.
+    pub const SERVICE_NAME: &str = "egressdns";
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    /// Hand control to the service control manager. Blocks until the service stops.
+    pub fn dispatch() -> Result<()> {
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
+        Ok(())
+    }
+
+    fn service_main(arguments: Vec<OsString>) {
+        let _ = run_service(arguments);
+    }
+
+    fn run_service(arguments: Vec<OsString>) -> Result<()> {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+        let status_handle =
+            service_control_handler::register(SERVICE_NAME, move |event| match event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    let _ = stop_tx.send(true);
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                ServiceControl::UserEvent(_) => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            })?;
+
+        report(
+            &status_handle,
+            ServiceState::StartPending,
+            ServiceControlAccept::empty(),
+            30,
+        )?;
+
+        // The SCM passes argv[0] plus the configured binPath arguments, so the service
+        // command line parses exactly like the console one.
+        let cli = match super::Cli::try_parse_from(&arguments) {
+            Ok(cli) => cli,
+            Err(e) => {
+                eprintln!("egressdnsd: bad service command line: {e}");
+                report(
+                    &status_handle,
+                    ServiceState::Stopped,
+                    ServiceControlAccept::empty(),
+                    0,
+                )?;
+                anyhow::bail!("the service command line is not a valid daemon invocation");
+            }
+        };
+
+        let outcome = super::run_daemon(cli, Some(stop_rx));
+
+        report(
+            &status_handle,
+            ServiceState::Stopped,
+            ServiceControlAccept::empty(),
+            0,
+        )?;
+        // The exit code is meaningless to the service controller once Stopped is
+        // reported; only the error matters.
+        outcome.map(|_| ())
+    }
+
+    fn report(
+        handle: &ServiceStatusHandle,
+        state: ServiceState,
+        controls: ServiceControlAccept,
+        wait_hint_secs: u64,
+    ) -> Result<()> {
+        handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: state,
+            controls_accepted: controls,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(wait_hint_secs.max(1)),
+            process_id: None,
+        })?;
+        Ok(())
+    }
 }
