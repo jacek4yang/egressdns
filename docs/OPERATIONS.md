@@ -9,6 +9,12 @@ Throughout, `$CTL` means `egressdnsctl` and `$SOCK` means the admin socket, whic
 `/run/egressdns/admin.sock` under the packaged unit and whatever you set in `admin.socket`
 otherwise. Commands that need root are shown with `sudo`.
 
+On Windows the same commands apply with two substitutions: the admin endpoint is the
+named pipe `\.\pipe\egressdns-admin` (the default, so `$SOCK` is usually unnecessary),
+and the service is managed with `Get-Service`/`Stop-Service`/`sc.exe` instead of
+`systemctl`. Installation, service lifecycle, port-conflict diagnosis and the platform
+differences that remain are in [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
+
 ---
 
 ## 1. Testing on UDP and TCP port 1053

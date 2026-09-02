@@ -1,6 +1,26 @@
 # Status
 
-**Version**: 2.0.1 · **Date**: 2026-08-20 · **Published**: <https://github.com/jacek4yang/egressdns>
+**Version**: 4.0.0 · **Date**: 2026-09-03 · **Published**: <https://github.com/jacek4yang/egressdns>
+
+## 4.0.0 summary
+
+The Windows release. Every claim is marked with the command or test behind it, as always.
+
+| Claim | Evidence |
+| --- | --- |
+| The daemon builds, lints and serves DNS natively on Windows | **Measured** on this host — `cargo build --release` (MSVC), `egressdnsctl query www.bing.com --server 127.0.0.1 --port 1053` answered NOERROR over UDP and TCP |
+| The full test suite passes on Windows | **Measured** — `cargo test --workspace --all-features`: 629 passed, 0 failed on x86_64-pc-windows-msvc; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --all -- --check` clean |
+| The control plane works on Windows | **Measured** — `egressdnsctl status/network` over the `\.\pipe\egressdns-admin` named pipe; Unix-socket path unchanged on Linux |
+| Network detection works on Windows | **Measured** — `egressdnsctl network` reports gateway `192.168.31.1`, source addresses, and adapter names via the IP helper API; `upstreams = ["auto"]` expanded to regional sources |
+| Windows CI runs the full matrix | **Structural** — `.github/workflows/ci.yml` matrix `ubuntu-latest`/`windows-latest` runs fmt, clippy, tests, release build, docs and shipped-config validation on both |
+| The release produces Windows artifacts | **Structural** — `.github/workflows/release.yml` builds `windows-x86_64` on a Windows runner with version verification, config validation, and a SHA256SUMS covering every archive |
+| EgressDNS is faster than direct 223.5.5.5 on warm answers | **Measured** on this host — `egressdnsctl bench`: direct 223.5.5.5 warm p50 12.0 ms vs EgressDNS warm p50 <0.1 ms over the 14-name corpus; cold path at upstream RTT + ~3 ms |
+| Cache-hit service time | **Measured** — serial closed-loop load through the full socket path: p50 81 µs, p99 130 µs (Windows, loopback UDP) |
+| `www.bing.com` does not stall | **Measured** — NOERROR over UDP in 11–15 ms cold, sub-millisecond warm, with default background DNSSEC |
+| Background validation no longer evicts answers an unprovable upstream cannot confirm | **Tested** — `tests/resolution.rs::background_validation_keeps_answers_a_proofless_upstream_cannot_confirm` fails against the unpatched tree (mock upstream saw a third exchange) and passes with the fix |
+| Windows service mode | **Structural** — `egressdnsd --service` registers with the SCM via `windows-service`; stop handling shares the graceful-shutdown path; `doctor` reports the service state |
+| Config docs stay in sync | **Measured** — `check-config-docs.py`: 201 fields across 34 tables documented, none stale, run on Windows via the same script |
+| A 24-hour soak on Windows | **Unverified.** Not run for this release. |
 
 ## 2.0.1 summary
 

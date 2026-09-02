@@ -280,3 +280,80 @@ large answer into SERVFAIL — was invisible to Criterion. Two of them made the 
 
 A regression that buys correctness is acceptable and should say so in the commit message.
 A regression that buys nothing is not.
+
+## Windows host measurements — v4.0.0
+
+The v4.0.0 Windows port added a measurement tool that had been missing: a comparison of
+real resolvers from a real host, over real UDP, through the same code path
+`egressdnsctl query` uses. This is the comparison the product exists to win, and until
+4.0.0 no tool in the repository could produce it — `scripts/load-test.sh` measures
+throughput against a synthetic upstream, and Criterion measures the library.
+
+### Method
+
+```
+egressdnsd.exe --config <bench config>            # upstreams = ["223.5.5.5", "119.29.29.29"]
+egressdnsctl bench \
+    --server 223.5.5.5 --server 119.29.29.29 --server 1.1.1.1 \
+    --server 127.0.0.1:1053 \
+    --cold-rounds 1 --warm-rounds 8 --concurrency 8 --timeout-ms 3000 \
+    --json-out results.json
+```
+
+The default corpus is 14 names: deep CNAME chains (`www.bing.com`), CDN-heavy and
+dual-stack names (`www.microsoft.com`, `www.cloudflare.com`, `www.apple.com`,
+`www.netflix.com`, `www.google.com`), the major regional CDNs, and signed and unsigned
+zones. *Useful* means NOERROR with an answer record. The EgressDNS row deliberately uses
+the same two upstreams as the direct rows, so the cold row is the price of the layer and
+the warm row is what the layer buys — no third variable is hidden in the configuration.
+
+### Results
+
+| Server | workload | useful | p50 | p95 | p99 | max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 223.5.5.5 (direct) | cold | 14/14 | 12.0 ms | 23.0 ms | 23.0 ms | 23.0 ms |
+| 223.5.5.5 (direct) | warm | 112/112 | 12.0 ms | 14.0 ms | 29.0 ms | 30.0 ms |
+| 119.29.29.29 (direct) | warm | 112/112 | 15.0 ms | 18.0 ms | 19.0 ms | 20.0 ms |
+| 1.1.1.1 (direct) | cold | 14/14 | 74.0 ms | 84.0 ms | 84.0 ms | 84.0 ms |
+| EgressDNS 127.0.0.1:1053 | cold | 14/14 | 15.0 ms | 17.0 ms | 17.0 ms | 17.0 ms |
+| EgressDNS 127.0.0.1:1053 | warm | 112/112 | <0.1 ms | <0.1 ms | <0.1 ms | <0.1 ms |
+
+Read honestly:
+
+* **Warm answers are two orders of magnitude faster than any direct resolver.** That is
+  the product: a resolver that keeps learning the names you actually ask gets faster the
+  longer it runs.
+* **The cold path is upstream RTT plus ~3 ms** — the cost of the acceleration layer on a
+  first-ever query. Against 223.5.5.5 specifically, EgressDNS's cold p50 matched the
+  direct path within measurement noise; per name it sometimes beat it, because the
+  scheduler races two upstreams and keeps the fastest admissible answer. Physics is not
+  being claimed against here: a first-ever uncached query cannot be faster than the
+  fastest upstream plus one loopback hop, and no claim that it can would be honest.
+* **`www.bing.com`** — the v3 regression target — answered NOERROR over UDP and TCP on
+  the cold path (11–15 ms), with the deep CNAME chain resolved by the upstream's own
+  recursive answer rather than a foreground proof walk.
+* **Serial cache-hit service time**, measured with one client and one outstanding query
+  so the generator cannot queue: **p50 81 µs, p99 130 µs** through the full socket path.
+  The Criterion `path/cache_hit_full` figure on this host was 2.4 µs in-process; the
+  ~78 µs difference is socket, scheduler and kernel — which is exactly why
+  microbenchmark numbers are never quoted as throughput.
+
+### What this run is not
+
+* Not a saturation measurement. The Python load generator saturates well before the
+  daemon on Windows (~2–7 kqps generator-side); the closed-loop harness cannot find the
+  daemon's ceiling there. The Linux numbers below were produced where the generator
+  saturated first, and are floors on daemon capacity, not measurements of it.
+* Not a CPU/OS comparison to the Linux table. Different machine, different kernel,
+  different sockets; the only valid reading of this table is "on this Windows host,
+  against these resolvers, on this day".
+
+### Environment
+
+| | |
+| --- | --- |
+| OS | Windows 11 Pro (build 26200) x86_64 |
+| CPU | Intel Core i7-10700 @ 2.90 GHz, 16 logical cores |
+| Rust | rustc 1.95.0 (59807616e 2026-04-14), `x86_64-pc-windows-msvc` |
+| Profile | `[profile.release]` — unchanged |
+| Date | 2026-09-03 |

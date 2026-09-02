@@ -564,7 +564,7 @@ Official Cloudflare prefix sources. These are the only source of truth for what 
 | `min_ipv6_prefixes` | integer | `4` | Minimum number of IPv6 prefixes a snapshot must contain to be accepted. |
 | `api_token_file` | path (optional) | unset | Optional file containing a Cloudflare API token. The token is never required: the IP endpoint is public. |
 | `api_token_env` | string (optional) | unset | Optional environment variable holding a Cloudflare API token. |
-| `cache_file` | path (optional) | `PathBuf::from("/var/lib/egressdns/cloudflare-prefixes.json")` | Path where the last valid snapshot is cached on disk. |
+| `cache_file` | path (optional) | Unix: `/var/lib/egressdns/cloudflare-prefixes.json`; Windows: `%ProgramData%\egressdns\cloudflare-prefixes.json` | Path where the last valid snapshot is cached on disk. |
 
 ### `[cloudflare.seeds]`
 
@@ -687,7 +687,7 @@ SQLite persistence of learned state.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Master switch. When disabled the resolver runs with purely in-memory state. |
-| `path` | path | `PathBuf::from("/var/lib/egressdns/state.sqlite3")` | Database path. |
+| `path` | path | Unix: `/var/lib/egressdns/state.sqlite3`; Windows: `%ProgramData%\egressdns\state.sqlite3` | Database path. |
 | `flush_interval` | duration | `30s` | Interval between batched flushes. |
 | `queue_size` | integer | `8192` | Bounded write queue. |
 | `max_quality_rows` | integer | `50000` | Maximum number of persisted IP quality rows. |
@@ -723,7 +723,7 @@ Local administration socket.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Master switch. |
-| `socket` | path | `PathBuf::from("/run/egressdns/admin.sock")` | Unix domain socket path. |
+| `socket` | path | Unix: `/run/egressdns/admin.sock`; Windows: `\.\pipe\egressdns-admin` (named pipe) | Control-plane endpoint: Unix domain socket on Unix, named pipe on Windows. `socket_mode` applies to Unix only. |
 | `socket_mode` | integer | `0o660` | Socket file mode. |
 | `max_request_bytes` | integer | `65536` | Maximum accepted request size. |
 
@@ -771,7 +771,7 @@ resolver that is quietly wrong.
 | `cloudflare.mode = "verified-augment"` requires `probe.enabled = true`. | Augmentation without probe evidence would be guessing, and this daemon does not guess about answers. |
 | Every probe profile needs a unique non-empty name, at least one domain, a path starting with `/`, and valid HTTP status codes in `allowed_status`. | A malformed profile would otherwise fail silently at probe time, which looks identical to "the address is bad". |
 | Every seed endpoint URL must be an absolute `https://` URL. | A cleartext candidate list is an on-path attacker's input to your answers. |
-| `admin.socket` must be an absolute path and `admin.socket_mode` must grant nothing to "other". | The admin socket can flush the cache and change Cloudflare modes; it is not a public interface. |
+| `admin.socket` must be an absolute path (or a `\.\pipe\` endpoint on Windows) and `admin.socket_mode` must grant nothing to "other". | The admin socket can flush the cache and change Cloudflare modes; it is not a public interface. |
 | `admin.max_request_bytes` must be between 1 and 1 MiB. | The admin protocol is line-oriented; an unbounded line is an OOM. |
 | `storage.path` must be absolute; `resources.worker_threads` must be 1–512. | An ambiguous relative path under a `systemd` unit with `ProtectSystem=strict` is a confusing failure; an absurd thread count is a resource-exhaustion foot-gun. |
 
