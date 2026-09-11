@@ -41,12 +41,13 @@ defect the Windows work surfaced.
 
 * **Background validation no longer evicts answers an unprovable upstream cannot
   confirm.** hickory stamps records `Proof::Bogus` both for bad signatures and for chain
-  walks it could not complete, so an upstream that returns no DNSSEC records at all — a
-  gateway forwarder, a stripped response — had every unsigned answer served once, evicted,
-  and re-fetched forever. The evidence plane now verifies the upstream can return DNSSEC
-  records at all (a raw root-DNSKEY probe) before trusting a Bogus verdict. An incapable
-  upstream's verdict is recorded as unprovable and nothing is destroyed. Strict mode still
-  fails closed, and `dnssec-failed.org` is still evicted after being served once.
+  walks it could not complete, so an upstream that supplies no DNSSEC proofs — a gateway
+  forwarder, a non-validating public resolver — had every unsigned answer served once,
+  evicted, and re-fetched forever (`www.bing.com` behind 223.5.5.5 did exactly that).
+  The two shapes are separable by what the answer carries: a genuine forgery arrives
+  with signatures attached and failing, a dead chain walk stamps Bogus on answers with
+  none. The evidence plane now evicts only the first and records the second as
+  unprovable (`dnssec.bogus_withheld`). Strict mode still fails closed.
 * **Windows doctor accuracy.** Windows reports an exclusive-binding conflict as
   `WSAEACCES`, not `WSAEADDRINUSE`, which made every held port look like a privilege
   failure; Windows has no privileged ports, so the error now reads as the conflict it is.
