@@ -1,7 +1,7 @@
 # EgressDNS
 
 An adaptive, highly available DNS caching forwarder for enterprise LANs with a single
-Internet egress.
+Internet egress. Runs natively on Linux and Windows.
 
 EgressDNS answers DNS for a LAN. It caches aggressively, forwards over encrypted transports
 (DoT, DoH2, DoH3, DoQ) as well as plain UDP and TCP, validates DNSSEC, and adapts its
@@ -109,6 +109,9 @@ ceilings, TLS roots — remain in [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
   [ADR-0010](docs/adr/0010-preserve-before-augment.md).
 * **Degradation you can verify.** `scripts/chaos-test.sh` breaks each subsystem in turn and
   asserts DNS still works.
+* **Cross-platform.** Linux (x86_64, aarch64, systemd) and Windows (x86_64 MSVC, service
+  control manager, named-pipe control plane, PowerShell installers) are built, tested and
+  linted on every commit, and shipped as release artifacts with checksums.
 
 ## What it does not do
 
@@ -118,7 +121,11 @@ any configuration. The reasoning for each is in [`docs/adr/`](docs/adr/).
 
 ## Install
 
-One command, from a GitHub release:
+**Windows:** download `egressdns-v…-windows-x86_64.zip` from a release, verify it against
+`SHA256SUMS`, and run `install.ps1` from an elevated PowerShell — see
+[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).
+
+**Linux**, one command, from a GitHub release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jacek4yang/egressdns/main/install.sh | sudo bash

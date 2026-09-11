@@ -1,13 +1,22 @@
-//! The administration socket server.
+//! The administration control-plane server.
+//!
+//! Unix serves over a Unix domain socket; Windows serves over a named pipe. Both speak
+//! the same newline-delimited JSON protocol, and every command handler below is shared.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 use crate::admin::{parse_request, Request, Response};
 use crate::config::{CloudflareMode, Config};
@@ -15,23 +24,68 @@ use crate::error::AdminError;
 use crate::probe::job::ProbeJob;
 use crate::runtime::App;
 
-/// Bind the administration socket, replacing a stale socket file if present.
-pub fn bind(path: &Path, mode: u32) -> Result<UnixListener, AdminError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// The listening half of the administration control plane.
+pub enum AdminListener {
+    /// Unix domain socket listener.
+    #[cfg(unix)]
+    Unix(UnixListener),
+    /// The first named-pipe server instance. `serve` creates a fresh instance for the
+    /// next client every time one connects.
+    #[cfg(windows)]
+    Pipe {
+        /// Pipe path, for creating follow-on instances.
+        name: std::ffi::OsString,
+        /// The listening pipe instance.
+        server: NamedPipeServer,
+    },
+}
+
+/// Bind the administration endpoint, replacing a stale socket file if present.
+pub fn bind(path: &Path, mode: u32) -> Result<AdminListener, AdminError> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // A leftover socket from a crashed process would otherwise make binding fail.
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        let listener = UnixListener::bind(path)?;
+        let permissions = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, permissions)?;
+        Ok(AdminListener::Unix(listener))
     }
-    // A leftover socket from a crashed process would otherwise make binding fail.
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
+    #[cfg(windows)]
+    {
+        // A named pipe has no filesystem presence, so there is no stale socket to clean
+        // and no permission bits to set: the pipe's security descriptor inherits from the
+        // daemon's token, which limits the control plane to the service account,
+        // administrators and (in console mode) the running user. A second `create` while
+        // the first instance lives fails, which is the desired refusal of a double bind.
+        let _ = mode;
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(path)?;
+        Ok(AdminListener::Pipe {
+            name: path.as_os_str().to_os_string(),
+            server,
+        })
     }
-    let listener = UnixListener::bind(path)?;
-    let permissions = std::fs::Permissions::from_mode(mode);
-    std::fs::set_permissions(path, permissions)?;
-    Ok(listener)
 }
 
 /// Serve administration requests until cancelled.
-pub async fn serve(listener: UnixListener, app: Arc<App>) {
+pub async fn serve(listener: AdminListener, app: Arc<App>) {
+    match listener {
+        #[cfg(unix)]
+        AdminListener::Unix(listener) => serve_unix(listener, app).await,
+        #[cfg(windows)]
+        AdminListener::Pipe { name, server } => serve_pipe(name, server, app).await,
+    }
+}
+
+#[cfg(unix)]
+async fn serve_unix(listener: UnixListener, app: Arc<App>) {
     let cancel = app.cancel.clone();
     loop {
         let accepted = tokio::select! {
@@ -50,9 +104,64 @@ pub async fn serve(listener: UnixListener, app: Arc<App>) {
     }
 }
 
-async fn handle_connection(stream: UnixStream, app: Arc<App>) -> Result<(), AdminError> {
+#[cfg(windows)]
+async fn serve_pipe(name: std::ffi::OsString, server: NamedPipeServer, app: Arc<App>) {
+    use tokio::sync::Semaphore;
+
+    let cancel = app.cancel.clone();
+    // Bound the number of control-plane clients being served at once. Each accepted
+    // client takes one instance; a new instance is created for the next accept, so the
+    // bound is what stops an unbounded pile of idle pipes.
+    let permits = Arc::new(Semaphore::new(16));
+    let mut server = server;
+    loop {
+        // Await the client *before* touching ownership of `server`: the connect future
+        // borrows it, and the connected instance is handed to the handler only once the
+        // wait has finished.
+        let accepted = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            connected = server.connect() => connected,
+        };
+        // A client that connects and vanishes between `create` calls surfaces here; the
+        // connected instance still becomes a handler and reads EOF immediately.
+        if let Err(e) = accepted {
+            tracing::debug!(event = "admin.pipe_accept_failed", error = %e);
+        }
+        let client = server;
+        let app_for_client = Arc::clone(&app);
+        let permits_for_client = Arc::clone(&permits);
+        tokio::spawn(async move {
+            let _permit = permits_for_client.acquire_owned().await;
+            let _ = handle_connection(client, app_for_client).await;
+        });
+
+        // A fresh listening instance is required before any further client can connect.
+        // A failure here is retried rather than allowed to end the control plane.
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            match ServerOptions::new().create(&name) {
+                Ok(next) => {
+                    server = next;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(event = "admin.pipe_create_failed", error = %e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+}
+
+async fn handle_connection<S>(stream: S, app: Arc<App>) -> Result<(), AdminError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let max_bytes = app.config().admin.max_request_bytes;
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -540,6 +649,7 @@ enabled = false
         Config::from_toml(&toml_text, "<dump>").expect("dump round-trips");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn socket_permissions_are_restricted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -557,6 +667,19 @@ enabled = false
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_second_bind_of_a_live_pipe_is_refused() {
+        // The pipe namespace is global, so a unique name keeps parallel test runs honest.
+        let path =
+            std::path::PathBuf::from(format!(r"\\.\pipe\egressdns-test-{}", std::process::id()));
+        let _listener = bind(&path, 0o660).expect("bind");
+        assert!(
+            bind(&path, 0o600).is_err(),
+            "a live pipe must not be rebindable"
         );
     }
 }

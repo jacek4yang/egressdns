@@ -34,6 +34,14 @@ fn upstream_uri(transport: &str, addr: SocketAddr) -> String {
     }
 }
 
+/// Render a filesystem path as a TOML basic-string value.
+///
+/// Backslashes would read as escape sequences on Windows; forward slashes are accepted
+/// by the OS and keep the generated configuration valid on every platform.
+fn toml_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 fn fragment(transport: &str, addr: SocketAddr, ca_path: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
@@ -54,7 +62,7 @@ enabled = false
 {extra}
 "#,
         uri = upstream_uri(transport, addr),
-        ca = ca_path.display(),
+        ca = toml_path(ca_path),
     )
 }
 
@@ -217,7 +225,7 @@ enabled = false
 "#,
         port = addr.port(),
         ip = addr.ip(),
-        ca = ca_path.display()
+        ca = toml_path(&ca_path)
     );
     let daemon = Daemon::start(&text).await;
     let response = daemon
@@ -271,7 +279,7 @@ enabled = false
 enabled = false
 "#,
         list = uris.join(", "),
-        ca = ca_path.display()
+        ca = toml_path(&ca_path)
     );
 
     let daemon = Daemon::start(&text).await;

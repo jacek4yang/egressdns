@@ -1037,8 +1037,11 @@ fn validate_observability(cfg: &Config) -> Result<(), ConfigError> {
         ));
     }
     if cfg.admin.enabled {
-        if !cfg.admin.socket.is_absolute() {
-            return Err(err("admin.socket", "must be an absolute path"));
+        if !crate::platform::is_valid_admin_endpoint(&cfg.admin.socket) {
+            return Err(err(
+                "admin.socket",
+                "must be an absolute path (or a \\\\.\\pipe\\ endpoint on Windows)",
+            ));
         }
         if cfg.admin.socket_mode & 0o007 != 0 {
             return Err(err(

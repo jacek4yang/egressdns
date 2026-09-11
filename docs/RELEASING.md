@@ -59,12 +59,16 @@ git push origin v1.2.3
 
 The tag push triggers `.github/workflows/release.yml`, which:
 
-1. Verifies the tag matches `Cargo.toml`.
+1. Verifies the tag matches `Cargo.toml`, on every build job independently.
 2. Builds `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` **in one job**, so
-   artefacts never leave the runner.
-3. Verifies the built binary reports the tagged version.
-4. Produces reproducible tarballs — fixed ownership, sorted entries, the tag commit's date
-   as the mtime — plus `SHA256SUMS`.
+   those artefacts never leave the runner until they are complete archives, and
+   `x86_64-pc-windows-msvc` on a Windows runner — every artifact built natively.
+3. Verifies each built binary reports the tagged version, on its own platform. The
+   Windows job also runs `--check-config` against the shipped example before it is
+   allowed to ship.
+4. Produces reproducible Linux tarballs — fixed ownership, sorted entries, the tag
+   commit's date as the mtime — a Windows zip, and a `SHA256SUMS` covering every archive,
+   generated from the bytes that are about to be published.
 5. Creates the release as a **draft**, uploads everything, then publishes. A partially
    uploaded release is never visible.
 

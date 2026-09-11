@@ -1,24 +1,39 @@
 //! Host inspection primitives used by [`super::run`].
 //!
-//! Everything here reads the live system: `/proc`, the routing stack, the filesystem.
-//! Each function is written to degrade to "unknown" rather than to guess, because a
-//! diagnosis that invents evidence is worse than one that admits it could not look.
+//! Everything here reads the live system: the routing stack, the socket tables, the
+//! filesystem. Each function is written to degrade to "unknown" rather than to guess,
+//! because a diagnosis that invents evidence is worse than one that admits it could not
+//! look. Platform differences are confined to this file; the checks in [`super`] call the
+//! same functions everywhere.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
-/// Whether the current process is root.
+/// Whether the current process runs with full administrator rights (Windows) or as root
+/// (Unix).
+#[cfg(unix)]
 pub fn is_root() -> bool {
     // Safe: `geteuid` cannot fail and takes no arguments.
     nix::unistd::geteuid().is_root()
 }
 
-/// Whether `CAP_NET_BIND_SERVICE` is in the effective capability set.
+/// Windows has no privileged-port concept, but full administrator rights are what the
+/// "run as root" advice below means there.
+#[cfg(windows)]
+pub fn is_root() -> bool {
+    is_elevated::is_elevated()
+}
+
+/// Whether the process may bind ports below 1024.
 ///
 /// Returns `None` when the capability set could not be read, which is reported as
 /// `NOT_TESTED` rather than assumed either way.
+#[cfg(target_os = "linux")]
 pub fn has_net_bind_service() -> Option<bool> {
     // CAP_NET_BIND_SERVICE is bit 10.
     const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
@@ -31,6 +46,19 @@ pub fn has_net_bind_service() -> Option<bool> {
         .to_string();
     let bits = u64::from_str_radix(&line, 16).ok()?;
     Some(bits & CAP_NET_BIND_SERVICE != 0)
+}
+
+/// Windows has no privileged-port concept: any process that is not explicitly denied can
+/// bind port 53.
+#[cfg(windows)]
+pub fn has_net_bind_service() -> Option<bool> {
+    Some(true)
+}
+
+/// Neither root nor capabilities are known on other platforms; report honestly.
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn has_net_bind_service() -> Option<bool> {
+    None
 }
 
 /// What a bind attempt revealed about a listen address.
@@ -66,26 +94,51 @@ fn classify_bind(result: std::io::Result<()>) -> PortState {
 pub fn udp_port_state(addr: SocketAddr) -> PortState {
     // `SO_REUSEADDR` is deliberately not set: the question is whether the daemon could
     // take exclusive ownership, which is what its own bind will attempt.
-    classify_bind(std::net::UdpSocket::bind(addr).map(|_| ()))
+    let state = classify_bind(std::net::UdpSocket::bind(addr).map(|_| ()));
+    windows_exclusive_bind(state)
 }
 
 /// Whether a TCP listen address can be bound.
 pub fn tcp_port_state(addr: SocketAddr) -> PortState {
-    classify_bind(std::net::TcpListener::bind(addr).map(|_| ()))
+    let state = classify_bind(std::net::TcpListener::bind(addr).map(|_| ()));
+    windows_exclusive_bind(state)
 }
 
-/// One listening socket read from `/proc/net`.
+/// Windows reports an exclusive-binding conflict as `WSAEACCES`, not `WSAEADDRINUSE`.
+///
+/// Windows has no privileged-port concept, so a permission failure there is never "this
+/// process is not allowed to bind port 53" — it is either another socket holding an
+/// exclusive bind or a system port reservation. Reporting `InUse` is strictly more
+/// useful than the Unix reading of the same error code.
+#[cfg(windows)]
+fn windows_exclusive_bind(state: PortState) -> PortState {
+    if state == PortState::PermissionDenied {
+        PortState::InUse
+    } else {
+        state
+    }
+}
+
+#[cfg(not(windows))]
+fn windows_exclusive_bind(state: PortState) -> PortState {
+    state
+}
+
+/// One listening socket read from the system socket tables.
 #[derive(Debug, Clone)]
 pub struct ListeningSocket {
     /// Local address.
     pub addr: SocketAddr,
     /// `"udp"` or `"tcp"`.
     pub proto: &'static str,
-    /// Socket inode, used to find the owning process.
+    /// Socket inode, used to find the owning process on Linux.
     pub inode: u64,
+    /// Owning process id, when the platform reports it with the socket (Windows).
+    pub pid: Option<u32>,
 }
 
 /// Every listening TCP and UDP socket this process is allowed to see.
+#[cfg(target_os = "linux")]
 pub fn listening_sockets() -> Vec<ListeningSocket> {
     let mut out = Vec::new();
     for (file, proto, v6) in [
@@ -111,13 +164,63 @@ pub fn listening_sockets() -> Vec<ListeningSocket> {
                 continue;
             };
             let inode = f[9].parse::<u64>().unwrap_or(0);
-            out.push(ListeningSocket { addr, proto, inode });
+            out.push(ListeningSocket {
+                addr,
+                proto,
+                inode,
+                pid: None,
+            });
         }
     }
     out
 }
 
+/// Every listening TCP and UDP socket, with owning PIDs, from the IP helper API.
+#[cfg(windows)]
+pub fn listening_sockets() -> Vec<ListeningSocket> {
+    use netstat2::{AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo};
+
+    let mut out = Vec::new();
+    let families = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+    let protocols = ProtocolFlags::TCP | ProtocolFlags::UDP;
+    let Ok(sockets) = netstat2::get_sockets_info(families, protocols) else {
+        return out;
+    };
+    for socket in sockets {
+        let pid = socket.associated_pids.first().copied();
+        match socket.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(tcp) => {
+                if tcp.state != netstat2::TcpState::Listen {
+                    continue;
+                }
+                out.push(ListeningSocket {
+                    addr: SocketAddr::new(tcp.local_addr, tcp.local_port),
+                    proto: "tcp",
+                    inode: 0,
+                    pid,
+                });
+            }
+            ProtocolSocketInfo::Udp(udp) => {
+                out.push(ListeningSocket {
+                    addr: SocketAddr::new(udp.local_addr, udp.local_port),
+                    proto: "udp",
+                    inode: 0,
+                    pid,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// No socket table is readable on this platform.
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn listening_sockets() -> Vec<ListeningSocket> {
+    Vec::new()
+}
+
 /// Parse the `HEXADDR:HEXPORT` form used throughout `/proc/net`.
+#[cfg(target_os = "linux")]
 fn parse_proc_addr(field: &str, v6: bool) -> Option<SocketAddr> {
     let (a, p) = field.split_once(':')?;
     let port = u16::from_str_radix(p, 16).ok()?;
@@ -145,6 +248,7 @@ fn parse_proc_addr(field: &str, v6: bool) -> Option<SocketAddr> {
 }
 
 /// Map socket inodes to `(name, pid)`, for as many processes as we may inspect.
+#[cfg(target_os = "linux")]
 fn inode_owners() -> HashMap<u64, (String, u32)> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -197,6 +301,8 @@ impl fmt::Display for SocketOwner {
             (Some(comm), Some(pid)) => {
                 write!(f, "{comm} (pid {pid}) on {}/{}", self.proto, self.addr)
             }
+            (Some(comm), None) => write!(f, "{comm} on {}/{}", self.proto, self.addr),
+            (None, Some(pid)) => write!(f, "pid {pid} on {}/{}", self.proto, self.addr),
             _ => write!(f, "an unidentified process on {}/{}", self.proto, self.addr),
         }
     }
@@ -222,15 +328,29 @@ pub fn owner_of(sockets: &[ListeningSocket], addr: SocketAddr, proto: &str) -> O
         .filter(|s| s.addr.ip() == addr.ip() || s.addr.ip().is_unspecified())
         .collect();
     let first = matching.first()?;
-    let owners = inode_owners();
-    for s in &matching {
-        if let Some((comm, pid)) = owners.get(&s.inode) {
-            return Some(SocketOwner {
-                comm: Some(comm.clone()),
-                pid: Some(*pid),
-                addr: s.addr,
-                proto: s.proto,
-            });
+    // Windows reports owning PIDs with the socket table; the process name is recovered
+    // from the pidfile the daemon writes next to its state database.
+    #[cfg(windows)]
+    if let Some(pid) = first.pid {
+        return Some(SocketOwner {
+            comm: process_name_for_pid(pid),
+            pid: Some(pid),
+            addr: first.addr,
+            proto: first.proto,
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let owners = inode_owners();
+        for s in &matching {
+            if let Some((comm, pid)) = owners.get(&s.inode) {
+                return Some(SocketOwner {
+                    comm: Some(comm.clone()),
+                    pid: Some(*pid),
+                    addr: s.addr,
+                    proto: s.proto,
+                });
+            }
         }
     }
     // The socket exists but its owner is invisible — usually another user's process.
@@ -242,21 +362,72 @@ pub fn owner_of(sockets: &[ListeningSocket], addr: SocketAddr, proto: &str) -> O
     })
 }
 
-/// Every address currently configured on a local interface.
-pub fn local_addresses() -> Vec<IpAddr> {
-    let mut out = Vec::new();
-    if let Ok(addrs) = nix::ifaddrs::getifaddrs() {
-        for ifaddr in addrs {
-            let Some(storage) = ifaddr.address else {
-                continue;
-            };
-            if let Some(v4) = storage.as_sockaddr_in() {
-                out.push(IpAddr::V4(v4.ip()));
-            } else if let Some(v6) = storage.as_sockaddr_in6() {
-                out.push(IpAddr::V6(v6.ip()));
-            }
+/// The process name behind `pid`, when this platform can know it.
+///
+/// Windows offers no unprivileged way to read an arbitrary process's image name, so the
+/// daemon is recognised by what it publishes: its pidfile, or the service control
+/// manager's record of the service process. Anything else is reported as an unidentified
+/// pid rather than guessed at — including our *own* process, which in a `doctor` run is
+/// the inspector, not the daemon.
+#[cfg(windows)]
+fn process_name_for_pid(pid: u32) -> Option<String> {
+    read_pidfile_owner(pid).or_else(|| service_pid_owner(pid))
+}
+
+/// Match `pid` against the pidfile the daemon writes at startup.
+///
+/// On Windows there is no `/proc` to read a process name from without elevation; the
+/// daemon publishing its own PID is the honest, unprivileged way to answer "is the
+/// process on port 53 ours?"
+#[cfg(windows)]
+fn read_pidfile_owner(pid: u32) -> Option<String> {
+    let bases = [
+        crate::platform::state_dir(),
+        std::env::var_os("ProgramData")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+            .join("egressdns"),
+    ];
+    for base in bases {
+        let path = base.join("egressdnsd.pid");
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if body.trim() == pid.to_string() {
+            return Some(String::from("egressdnsd"));
         }
     }
+    None
+}
+
+/// Match `pid` against the service control manager's record of the running service.
+#[cfg(windows)]
+fn service_pid_owner(pid: u32) -> Option<String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let service = manager
+        .open_service(
+            crate::platform::WINDOWS_SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS,
+        )
+        .ok()?;
+    let status = service.query_status().ok()?;
+    if status.process_id == Some(pid) {
+        Some(String::from("egressdnsd"))
+    } else {
+        None
+    }
+}
+
+/// Every address currently configured on a local interface.
+pub fn local_addresses() -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = crate::network::detect::interface_addresses()
+        .into_iter()
+        .map(|(_, ip)| ip)
+        .collect();
     out.sort();
     out.dedup();
     out
@@ -315,6 +486,7 @@ impl fmt::Display for ResolvConf {
 }
 
 /// Classify `/etc/resolv.conf`, without modifying it.
+#[cfg(unix)]
 pub fn classify_resolv_conf(path: &Path) -> Option<ResolvConf> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if meta.file_type().is_symlink() {
@@ -584,6 +756,7 @@ async fn dot_canary(
 /// `LoadState` is consulted first and `ActiveState` only afterwards, because
 /// `systemctl is-active` reports a unit systemd has never heard of as `inactive` — which
 /// would let `doctor` claim an uninstalled service is merely stopped.
+#[cfg(target_os = "linux")]
 pub fn systemd_unit_state(unit: &str) -> Option<String> {
     let load = std::process::Command::new("systemctl")
         .args(["show", "-p", "LoadState", "--value", unit])
@@ -604,10 +777,42 @@ pub fn systemd_unit_state(unit: &str) -> Option<String> {
     Some(active)
 }
 
+/// The state of a Windows service, or `None` when the service manager is unreachable.
+///
+/// A service that is not installed reads as `not-found`, matching the systemd branch:
+/// "stopped" would let `doctor` report a working install that does not exist.
+#[cfg(windows)]
+pub fn service_state(name: &str) -> Option<String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let Ok(service) = manager.open_service(name, ServiceAccess::QUERY_STATUS) else {
+        return Some(String::from("not-found"));
+    };
+    let Ok(status) = service.query_status() else {
+        return Some(String::from("unknown"));
+    };
+    Some(
+        match status.current_state {
+            windows_service::service::ServiceState::Stopped => "stopped",
+            windows_service::service::ServiceState::StartPending => "start-pending",
+            windows_service::service::ServiceState::StopPending => "stop-pending",
+            windows_service::service::ServiceState::Running => "running",
+            windows_service::service::ServiceState::ContinuePending => "continue-pending",
+            windows_service::service::ServiceState::PausePending => "pause-pending",
+            windows_service::service::ServiceState::Paused => "paused",
+        }
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn ipv4_proc_addresses_decode_little_endian() {
         // 0100007F:0035 is 127.0.0.1:53 as /proc writes it.
@@ -615,6 +820,7 @@ mod tests {
         assert_eq!(addr, "127.0.0.1:53".parse::<SocketAddr>().expect("literal"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn ipv6_proc_addresses_decode_per_word() {
         // The unspecified address on port 53.
@@ -622,6 +828,7 @@ mod tests {
         assert_eq!(addr, "[::]:53".parse::<SocketAddr>().expect("literal"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_malformed_proc_address_is_rejected_rather_than_guessed() {
         assert!(parse_proc_addr("nonsense", false).is_none());
@@ -651,6 +858,7 @@ mod tests {
     }
 
     /// A unit systemd has never heard of must read as `not-found`, not as `inactive`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_unknown_systemd_unit_is_reported_as_not_found() {
         if std::process::Command::new("systemctl")
@@ -669,6 +877,7 @@ mod tests {
             addr: addr.parse().expect("literal"),
             proto,
             inode: 0,
+            pid: None,
         }
     }
 
@@ -773,6 +982,7 @@ mod tests {
         assert!(!is_known_stub("9.9.9.9".parse().expect("literal")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn nameservers_are_read_from_a_resolv_conf_body() {
         let dir = tempfile::tempdir().expect("tempdir");

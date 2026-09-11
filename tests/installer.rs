@@ -13,6 +13,10 @@
 //! These tests run the `canary` function out of the shipped `install.sh` verbatim, so they
 //! exercise the deployed code rather than a copy of it.
 
+// The installer is a bash script and its canaries are POSIX shell; there is nothing to
+// exercise on Windows, where installation is PowerShell based.
+#![cfg(unix)]
+
 mod common;
 
 use std::net::SocketAddr;

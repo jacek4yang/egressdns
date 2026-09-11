@@ -1385,7 +1385,7 @@ impl Default for OfficialPrefixConfig {
             min_ipv6_prefixes: 4,
             api_token_file: None,
             api_token_env: None,
-            cache_file: Some(PathBuf::from("/var/lib/egressdns/cloudflare-prefixes.json")),
+            cache_file: Some(crate::platform::default_prefix_cache_path()),
         }
     }
 }
@@ -1687,7 +1687,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            path: PathBuf::from("/var/lib/egressdns/state.sqlite3"),
+            path: crate::platform::default_state_db_path(),
             flush_interval: Duration::from_secs(30),
             queue_size: 8_192,
             max_quality_rows: 50_000,
@@ -1758,9 +1758,11 @@ impl Default for LoggingConfig {
 pub struct AdminConfig {
     /// Master switch.
     pub enabled: bool,
-    /// Unix domain socket path.
+    /// Control-plane endpoint: a Unix domain socket path on Unix, a named pipe path
+    /// (`\\.\pipe\...`) on Windows.
     pub socket: PathBuf,
-    /// Socket file mode.
+    /// Socket file mode (Unix; ignored on Windows, where the pipe's default security
+    /// descriptor limits access to the service account and administrators).
     pub socket_mode: u32,
     /// Maximum accepted request size.
     pub max_request_bytes: usize,
@@ -1770,7 +1772,7 @@ impl Default for AdminConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            socket: PathBuf::from("/run/egressdns/admin.sock"),
+            socket: PathBuf::from(crate::platform::DEFAULT_ADMIN_ENDPOINT),
             socket_mode: 0o660,
             max_request_bytes: 64 * 1024,
         }

@@ -258,6 +258,11 @@ pub fn bind_udp(addr: SocketAddr, cfg: &UdpConfig) -> Result<UdpSocket, Listener
             addr,
             source,
         })?;
+    // On Unix, `SO_REUSEADDR` only avoids a TIME_WAIT stale-bind failure and cannot let a
+    // second process steal the port. Windows' `SO_REUSEADDR` has no such guarantee — it
+    // would allow another process to bind the same address and intercept traffic — so it
+    // is deliberately not set there.
+    #[cfg(unix)]
     socket
         .set_reuse_address(true)
         .map_err(|source| ListenerError::SocketOption {
@@ -266,6 +271,10 @@ pub fn bind_udp(addr: SocketAddr, cfg: &UdpConfig) -> Result<UdpSocket, Listener
             source,
         })?;
     if cfg.reuse_port {
+        // `SO_REUSEPORT` is a Unix concept: one socket per worker, load-balanced by the
+        // kernel. Windows has no equivalent, so the flag is reported and ignored rather
+        // than silently pretending to have opened extra sockets.
+        #[cfg(unix)]
         socket
             .set_reuse_port(true)
             .map_err(|source| ListenerError::SocketOption {
@@ -273,6 +282,12 @@ pub fn bind_udp(addr: SocketAddr, cfg: &UdpConfig) -> Result<UdpSocket, Listener
                 addr,
                 source,
             })?;
+        #[cfg(windows)]
+        tracing::warn!(
+            event = "listener.udp.reuse_port_unsupported",
+            address = %addr,
+            "server.udp.reuse_port has no effect on Windows; one socket will be bound"
+        );
     }
     if addr.is_ipv6() {
         // Keep the two families separate so that ACLs and metrics stay unambiguous.
@@ -324,6 +339,9 @@ pub fn bind_tcp(addr: SocketAddr, _cfg: &TcpConfig) -> Result<TcpListener, Liste
             addr,
             source,
         })?;
+    // Unix-only, for the same reason as the UDP socket: Windows `SO_REUSEADDR` would let
+    // another process steal the port rather than merely permit a TIME_WAIT rebind.
+    #[cfg(unix)]
     socket
         .set_reuse_address(true)
         .map_err(|source| ListenerError::SocketOption {

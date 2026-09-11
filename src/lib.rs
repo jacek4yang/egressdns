@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod bench;
 pub mod cache;
 pub mod cloudflare;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod doctor;
 pub mod error;
 pub mod metrics;
 pub mod network;
+pub mod platform;
 pub mod policy;
 pub mod probe;
 pub mod ranking;

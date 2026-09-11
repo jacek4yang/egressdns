@@ -4,6 +4,76 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] — 2026-09-03
+
+**Windows is a first-class platform, and the performance story is measured against real
+resolvers from a real host.** The resolver itself is unchanged in the ways that matter;
+what changed is where it runs, how its claims are evidenced, and one background-plane
+defect the Windows work surfaced.
+
+### Breaking
+
+* **Windows is supported** — which breaks no configuration, but every installation,
+  packaging and operations document that said "Linux" now has a Windows counterpart, and
+  CI builds, tests and lints on both. The daemon, the control plane, doctor, quality
+  learning and all six upstream transports work on Windows.
+
+### Added
+
+* **Native Windows support.** `x86_64-pc-windows-msvc` builds, tests, lints and ships.
+  Unix-only dependencies are target-gated; Windows system integration uses safe wrapper
+  crates (`netdev`, `netstat2`, `is_elevated`, `windows-service`), so the
+  repository-wide `#![forbid(unsafe_code)]` still holds. The administration control plane
+  is a named pipe (`\\.\pipe\egressdns-admin`) speaking the same protocol as the Unix
+  socket. `egressdnsd --service` runs under the service control manager with graceful
+  stop handling; `install.ps1` / `upgrade.ps1` / `uninstall.ps1` ship in the release
+  archive. EgressDNS never changes the host's DNS settings — pointing adapters at it is
+  an explicit, recoverable action the operator takes.
+* **`egressdnsctl bench`.** A real-DNS latency harness that measures resolvers from the
+  host it runs on: cold and warm workloads over a representative corpus, rcode tallies,
+  timeouts, p50–p99, machine-readable JSON. The comparisons in the release notes are
+  produced by this command; Criterion numbers measure the library and never the product.
+* **Windows artifacts in every release.** `egressdns-vX.Y.Z-windows-x86_64.zip` with
+  binaries, config example, PowerShell installers and an INSTALL-WINDOWS.md, checksummed
+  in the same SHA256SUMS as the Linux archives.
+
+### Fixed
+
+* **Background validation no longer evicts answers an unprovable upstream cannot
+  confirm.** hickory stamps records `Proof::Bogus` both for bad signatures and for chain
+  walks it could not complete, so an upstream that returns no DNSSEC records at all — a
+  gateway forwarder, a stripped response — had every unsigned answer served once, evicted,
+  and re-fetched forever. The evidence plane now verifies the upstream can return DNSSEC
+  records at all (a raw root-DNSKEY probe) before trusting a Bogus verdict. An incapable
+  upstream's verdict is recorded as unprovable and nothing is destroyed. Strict mode still
+  fails closed, and `dnssec-failed.org` is still evicted after being served once.
+* **Windows doctor accuracy.** Windows reports an exclusive-binding conflict as
+  `WSAEACCES`, not `WSAEADDRINUSE`, which made every held port look like a privilege
+  failure; Windows has no privileged ports, so the error now reads as the conflict it is.
+* **The test harness is TOML-safe on Windows.** Backslash paths in generated test
+  configurations parsed as escape sequences; they are now forward-slash rendered.
+
+### Measured
+
+On the development host (Windows 11, x86_64, Wi-Fi/LAN with Chinese regional egress),
+via `egressdnsctl bench` over the default 14-name corpus (deep CNAME chains, CDN-heavy
+and dual-stack names, signed and unsigned zones):
+
+| Server | workload | useful | p50 | p95 | p99 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 223.5.5.5 (direct) | cold | 14/14 | 12.0 ms | 23.0 ms | 23.0 ms |
+| 223.5.5.5 (direct) | warm | 112/112 | 12.0 ms | 14.0 ms | 29.0 ms |
+| 1.1.1.1 (direct) | warm | 112/112 | 74.0 ms | 83.0 ms | 86.0 ms |
+| EgressDNS | cold | 14/14 | 15.0 ms | 17.0 ms | 17.0 ms |
+| EgressDNS | warm | 112/112 | <0.1 ms | <0.1 ms | <0.1 ms |
+
+EgressDNS was configured with `223.5.5.5` and `119.29.29.29` as upstreams, so the cold
+row is the price of the acceleration layer and the warm row is its benefit: warm answers
+are two orders of magnitude faster than any direct resolver, and the cold path is at
+upstream RTT plus ~3 ms. `www.bing.com`, the regression target, answers NOERROR over UDP
+and TCP with no DNSSEC stall. A serial cache-hit load through the daemon measured 81 µs
+p50 / 130 µs p99 service time. Full numbers and method: `docs/BENCHMARKS.md`.
+
 ## [3.0.0] — 2026-08-20
 
 **The resolver answers first and proves afterwards.** A client gets the fastest admissible

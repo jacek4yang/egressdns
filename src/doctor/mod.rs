@@ -152,7 +152,7 @@ pub async fn run(config: &Config, config_path: &Path) -> Report {
     checks.push(check_privileged_ports(config));
     checks.push(check_address_families(config));
     checks.extend(check_upstream_transports(config).await);
-    checks.push(check_systemd());
+    checks.push(check_service());
 
     Report { checks }
 }
@@ -582,6 +582,10 @@ fn check_acl(config: &Config) -> Check {
 }
 
 /// Classify `/etc/resolv.conf` without touching it.
+///
+/// Windows configures the system resolver per interface rather than through a file, so
+/// the check is reported as not applicable there instead of pretending to look.
+#[cfg(unix)]
 fn check_resolv_conf(config: &Config) -> Check {
     let path = Path::new("/etc/resolv.conf");
     let kind = probes::classify_resolv_conf(path);
@@ -628,6 +632,19 @@ fn check_resolv_conf(config: &Config) -> Check {
             detail,
         ),
     }
+}
+
+/// On Windows the system resolver is configured per interface in the registry, not
+/// through a file; report that instead of testing a path that cannot exist.
+#[cfg(not(unix))]
+fn check_resolv_conf(_config: &Config) -> Check {
+    Check::new(
+        "resolv_conf.kind",
+        "System resolver configuration is understood",
+        Status::NotApplicable,
+        "Windows configures per-interface DNS servers; this check applies to \
+         /etc/resolv.conf on Unix",
+    )
 }
 
 /// Verify the paths the daemon must read and write.
@@ -822,8 +839,10 @@ fn check_address_families(config: &Config) -> Check {
     }
 }
 
-/// Report the systemd unit state, when systemd is present.
-fn check_systemd() -> Check {
+/// Report the service-manager unit state: systemd on Linux, the service control manager
+/// on Windows, not applicable anywhere else.
+#[cfg(target_os = "linux")]
+fn check_service() -> Check {
     match probes::systemd_unit_state("egressdns.service") {
         None => Check::new(
             "systemd.unit",
@@ -844,6 +863,41 @@ fn check_systemd() -> Check {
             format!("egressdns.service is {}", state.trim()),
         ),
     }
+}
+
+/// The installed Windows service, when there is one.
+#[cfg(windows)]
+fn check_service() -> Check {
+    match probes::service_state(crate::platform::WINDOWS_SERVICE_NAME) {
+        None => Check::new(
+            "service.state",
+            "Windows service state",
+            Status::NotApplicable,
+            "the service control manager could not be reached",
+        ),
+        Some(state) if state == "not-found" => Check::new(
+            "service.state",
+            "Windows service state",
+            Status::NotApplicable,
+            "the egressdns service is not installed (a console deployment reports no service)",
+        ),
+        Some(state) => Check::new(
+            "service.state",
+            "Windows service state",
+            Status::Pass,
+            format!("the egressdns service is {state}"),
+        ),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn check_service() -> Check {
+    Check::new(
+        "service.state",
+        "Service manager unit state",
+        Status::NotApplicable,
+        "no supported service manager on this platform",
+    )
 }
 
 #[cfg(test)]
@@ -923,7 +977,7 @@ enabled = false
     #[tokio::test]
     async fn a_clean_configuration_reports_no_failure() {
         let config = base_config("");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         assert!(
             !report.has_failure(),
             "unexpected failures: {:?}",
@@ -958,7 +1012,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         let c = check(&report, "loop.direct");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains(&format!("127.0.0.1:{port}")));
@@ -987,7 +1041,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         let c = check(&report, "loop.stub");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains("127.0.0.53"));
@@ -1014,7 +1068,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         let c = check(&report, "acl.coverage");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
     }
@@ -1041,7 +1095,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         let c = check(&report, "acl.coverage");
         assert_eq!(c.status, Status::Warning, "{}", c.detail);
     }
@@ -1069,7 +1123,7 @@ enabled = false
 "#
         );
         let config = Config::from_toml(&text, "test").expect("valid");
-        let report = run(&config, Path::new("/etc/hostname")).await;
+        let report = run(&config, std::env::temp_dir().as_path()).await;
         let c = check(&report, "listener.conflict");
         assert_eq!(c.status, Status::Fail, "{}", c.detail);
         assert!(c.detail.contains(&port.to_string()));
