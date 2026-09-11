@@ -506,18 +506,6 @@ impl Resolver {
         else {
             return;
         };
-        // A raw handle to the same upstream group, for the capability probe below. It
-        // must bypass the DNSSEC wrapper: the probe asks whether the *upstream* returns
-        // DNSSEC records, which the wrapper cannot answer about itself.
-        let probe_handle = {
-            let budget = self.config.server.foreground_budget;
-            let fallback = self.validators.keys().next();
-            self.scheduler
-                .registry()
-                .group(&key.view.group)
-                .or_else(|| fallback.and_then(|name| self.scheduler.registry().group(name)))
-                .map(|group| SchedulerHandle::new(Arc::clone(&self.scheduler), group, budget))
-        };
 
         metrics::counter!(crate::metrics::names::DNSSEC_PROOF_COMPLETION_TOTAL).increment(1);
         let budget = self.config.dnssec.proof_completion_timeout;
@@ -542,6 +530,17 @@ impl Resolver {
             })
             .await;
             drop(permit);
+
+            // Whether the validated answer carried signatures at all. This is the line
+            // between the two shapes a Bogus verdict can take, and it is decided before
+            // the outcome below consumes the message.
+            let carries_signatures = match &result {
+                Ok(Some(Ok(response))) => response
+                    .answers
+                    .iter()
+                    .any(|r| r.record_type() == RecordType::RRSIG),
+                _ => false,
+            };
 
             let outcome = match result {
                 Err(_) => ValidationOutcome::Timeout,
@@ -579,28 +578,24 @@ impl Resolver {
 
             match outcome {
                 ValidationOutcome::Bogus => {
-                    // A Bogus verdict is only evidence about the data if the upstream
-                    // can actually supply a chain of trust. Against an upstream that
-                    // returns no DNSSEC records at all — a gateway forwarder, a
-                    // stripped response — hickory stamps records `Bogus` because "no DS
-                    // found, no proof either way" and "the signature is wrong" surface
-                    // identically. Destroying data on the second shape is how a
-                    // DNSSEC-incapable upstream churns the cache for every unsigned
-                    // name: served once, evicted, re-fetched forever.
+                    // A Bogus verdict has two shapes, and hickory does not distinguish
+                    // them: a chain walk that died because the upstream supplies no
+                    // DNSSEC proofs (no DS, no NSEC — what a gateway forwarder or a
+                    // non-validating public resolver produces for *every* unsigned name
+                    // it serves), and signatures that were present and failed to
+                    // verify. Evicting the first shape churns the cache for every
+                    // unsigned name against such upstreams — measured live:
+                    // `www.bing.com` evicted and re-fetched forever behind 223.5.5.5.
                     //
-                    // So before evicting, ask the upstream itself, without the
-                    // validation wrapper, for the root DNSKEY. A recursive resolver
-                    // answers that unconditionally; an upstream that cannot return DNSSEC
-                    // records has no "bogus" opinion worth acting on, and the answer
-                    // stays. Failing open here is safe: the verdict is TTL-bounded
-                    // anyway, and strict mode still fails closed in the foreground.
-                    let capable = match &probe_handle {
-                        Some(handle) => {
-                            Self::upstream_can_return_dnskey_records(handle, &cfg).await
-                        }
-                        None => false,
-                    };
-                    if capable {
+                    // The shapes are separable by what the answer carries. A genuine
+                    // forgery arrives with the signatures attached and failing: the
+                    // upstream passed the zone data through and hickory checked it. A
+                    // chain walk that died stamps Bogus on answers carrying no
+                    // signatures at all, which is indistinguishable from the answer a
+                    // non-validating upstream was always going to produce. Only the
+                    // first is data removal; the second is punishing an upstream for
+                    // not being a validator.
+                    if carries_signatures {
                         if cache.evict_variant(&key, fingerprint) {
                             tracing::warn!(
                                 event = "dnssec.bogus",
@@ -616,8 +611,9 @@ impl Resolver {
                             event = "dnssec.bogus_withheld",
                             name = %key.name,
                             qtype = %key.qtype,
-                            "validation reported Bogus but this upstream returns no DNSSEC \
-                             records, so the verdict is unprovable; the answer is kept"
+                            "validation reported Bogus but the answer carries no signatures, \
+                             so the verdict can only mean the chain was unverifiable, not \
+                             that the data is forged; the answer is kept"
                         );
                         metrics::counter!(
                             crate::metrics::names::DNSSEC_OUTCOME_TOTAL,
@@ -642,46 +638,6 @@ impl Resolver {
                 | ValidationOutcome::Indeterminate => {}
             }
         });
-    }
-
-    /// Whether the upstream behind `handle` returns DNSSEC records at all.
-    ///
-    /// Probed with the root DNSKEY — the one zone every recursive resolver holds — and
-    /// judged on whether DNSKEY records actually came back. A stripped or forwarding
-    /// upstream returns an empty answer; the verdicts its validation produces about
-    /// individual names are then "unprovable", not "bogus". Bounded work: this runs once
-    /// per would-be eviction, which is the rare path.
-    async fn upstream_can_return_dnskey_records(
-        handle: &SchedulerHandle,
-        cfg: &crate::config::Config,
-    ) -> bool {
-        use futures_util::StreamExt;
-
-        let mut probe = Message::new(rand::random(), MessageType::Query, OpCode::Query);
-        probe.metadata.recursion_desired = true;
-        let mut edns = Edns::new();
-        // Ask for DNSSEC records: the point of the probe is whether any come back.
-        edns.set_dnssec_ok(true);
-        probe.edns = Some(edns);
-        probe.add_query(hickory_proto::op::Query::query(
-            hickory_proto::rr::Name::root(),
-            RecordType::DNSKEY,
-        ));
-        let request = hickory_proto::op::DnsRequest::new(probe, DnsRequestOptions::default());
-
-        let result = tokio::time::timeout(cfg.dnssec.proof_completion_timeout, async {
-            handle.send(request).next().await
-        })
-        .await;
-
-        match result {
-            Ok(Some(Ok(response))) => response
-                .into_message()
-                .answers
-                .iter()
-                .any(|r| r.record_type() == RecordType::DNSKEY),
-            _ => false,
-        }
     }
 
     fn next_seed(&self) -> u64 {

@@ -831,12 +831,14 @@ records = [{ name = "nas.home.arpa.", rtype = "A", value = "192.168.1.10" }]
 /// Background validation must not destroy an answer it could not finish checking.
 ///
 /// A validation run against an upstream that supplies no chain of trust - a gateway
-/// forwarder, a response with the records stripped, the in-process mock here - ends with
+/// forwarder, a non-validating public resolver, the in-process mock here - ends with
 /// hickory stamping the records `Bogus`, because "I asked for the DS and got no proof
-/// either way" and "the signature is wrong" surface the same way. The evidence plane's
-/// contract is that only a validation by an upstream that actually returns DNSSEC
-/// records may remove data. If this test fails, a DNSSEC-incapable upstream can churn
-/// the cache for every unsigned name: served once, evicted, re-fetched forever.
+/// either way" and "the signature is wrong" surface the same way. The shapes are
+/// separable by what the answer carries: a genuine forgery arrives with signatures
+/// attached and failing; a dead chain walk stamps Bogus on answers carrying none. The
+/// evidence plane evicts only the first. If this test fails, a DNSSEC-incapable
+/// upstream can churn the cache for every unsigned name: served once, evicted,
+/// re-fetched forever.
 ///
 /// The observable is upstream query counts. The validator always re-queries the A
 /// record itself, so after the first client query and its background validation the

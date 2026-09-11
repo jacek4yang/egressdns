@@ -17,7 +17,7 @@ The Windows release. Every claim is marked with the command or test behind it, a
 | EgressDNS is faster than direct 223.5.5.5 on warm answers | **Measured** on this host — `egressdnsctl bench`: direct 223.5.5.5 warm p50 12.0 ms vs EgressDNS warm p50 <0.1 ms over the 14-name corpus; cold path at upstream RTT + ~3 ms |
 | Cache-hit service time | **Measured** — serial closed-loop load through the full socket path: p50 81 µs, p99 130 µs (Windows, loopback UDP) |
 | `www.bing.com` does not stall | **Measured** — NOERROR over UDP in 11–15 ms cold, sub-millisecond warm, with default background DNSSEC |
-| Background validation no longer evicts answers an unprovable upstream cannot confirm | **Tested** — `tests/resolution.rs::background_validation_keeps_answers_a_proofless_upstream_cannot_confirm` fails against the unpatched tree (mock upstream saw a third exchange) and passes with the fix |
+| Background validation no longer evicts answers an unprovable upstream cannot confirm | **Tested and Measured** — `tests/resolution.rs::background_validation_keeps_answers_a_proofless_upstream_cannot_confirm` fails against the unpatched tree (mock upstream saw a third exchange) and passes with the fix; live on this host, `dnssec.bogus_withheld` replaced the per-answer evictions for unsigned names behind 223.5.5.5 |
 | Windows service mode | **Structural** — `egressdnsd --service` registers with the SCM via `windows-service`; stop handling shares the graceful-shutdown path; `doctor` reports the service state |
 | Config docs stay in sync | **Measured** — `check-config-docs.py`: 201 fields across 34 tables documented, none stale, run on Windows via the same script |
 | A 24-hour soak on Windows | **Unverified.** Not run for this release. |
