@@ -9,9 +9,9 @@
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 /// Whether the current process runs with full administrator rights (Windows) or as root
