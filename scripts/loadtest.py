@@ -34,6 +34,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import random
@@ -147,8 +148,7 @@ class ProcSampler(threading.Thread):
 
     # --- Windows ------------------------------------------------------------------
 
-    def _open_windows_process(self) -> "ctypes.WinDLL | None":
-        import ctypes
+    def _open_windows_process(self) -> ctypes.WinDLL | None:
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -156,11 +156,10 @@ class ProcSampler(threading.Thread):
         return handle if handle else None
 
     def _sample_windows(self) -> dict[str, float] | None:
-        import ctypes
         from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        api_ms = ctypes.WinDLL("api_ms_win_psapi_l1_1_0")
+        api_ms = ctypes.WinDLL("psapi")
         handle = self._process
 
         class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
