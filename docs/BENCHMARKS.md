@@ -300,6 +300,23 @@ overhead, `SO_RCVBUF` sizing, or Windows loopback behaviour. Candidates for rais
 socket per address today), receive batching (`recvmmsg`-style), and receive-buffer
 sizing. Until measured, 2,100 qps is the honest single-socket Windows figure.
 
+### Cold-path overhead against a real upstream (200 qps, unique generated names)
+
+Forwarding-only workload (unique names per query, so every query is a miss), 2 workers,
+10-second runs, upstream `223.5.5.5`:
+
+| Path | p50 | p95 | mean |
+| --- | ---: | ---: | ---: |
+| Direct to 223.5.5.5:53 | 46.9 ms | 89.5 ms | 54.9 ms |
+| Through EgressDNS (single upstream, same host) | 46.2 ms | 120.7 ms | 56.7 ms |
+
+The p50 difference is inside run-to-run noise — the earlier 1–3 ms cold-path estimate
+from the v4.0.0 resolver comparison was upstream variance, not local processing. The
+generated names resolve NXDOMAIN upstream, which is why the useful-answer rate is 0:
+this workload measures forwarding latency, not answer quality. Conclusion: cold misses
+through EgressDNS cost the upstream RTT plus nothing measurable locally; no
+optimisation is warranted for the miss path on this evidence.
+
 ## Performance regression policy
 
 A change touching the request path (`src/dns/`, `src/cache/`, `src/policy/`,
