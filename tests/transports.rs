@@ -335,3 +335,99 @@ async fn a_dead_upstream_does_not_stall_the_client() {
         "the client waited {elapsed:?}, which exceeds the foreground budget"
     );
 }
+
+/// A spoofed UDP response arriving before the real one must be ignored.
+///
+/// The upstream UDP client's first screen against forged answers is the message ID and
+/// the source endpoint: a packet whose ID does not match the query must be dropped
+/// without being parsed as an answer, no matter what else it contains. hickory hardened
+/// this receive loop (id checked on the raw bytes, short packets skipped, loop continues
+/// until a matching response arrives); this test pins the property at EgressDNS's
+/// boundary, where it matters: a same-port attacker cannot win the race by answering
+/// first.
+#[tokio::test]
+async fn a_spoofed_upstream_response_with_the_wrong_id_is_ignored() {
+    // A hand-rolled UDP upstream: it answers every query twice — first a datagram with
+    // a corrupted message ID, then the genuine response — so the client is always
+    // offered the spoof first.
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = socket.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            let (n, peer) = socket.recv_from(&mut buf).await.expect("recv");
+            if n < 12 {
+                continue;
+            }
+            // Find the end of the question section: labels to the root, then qtype/qclass.
+            let mut i = 12;
+            while i < n && buf[i] != 0 {
+                i += usize::from(buf[i]) + 1;
+            }
+            let question_end = (i + 5).min(n);
+
+            // The spoof: valid response flags, wrong message ID, same question.
+            let mut spoofed = buf[..question_end].to_vec();
+            spoofed[0] ^= 0xFF;
+            spoofed[1] ^= 0xFF;
+            spoofed[2] = 0x81;
+            spoofed[3] = 0x80;
+            spoofed.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 6, 6, 6, 6]);
+            spoofed[6] = 0;
+            spoofed[7] = 1;
+            // The echoed question may carry the query's ARCOUNT for its EDNS record;
+            // the response includes no additional records.
+            spoofed[10] = 0;
+            spoofed[11] = 0;
+            let _ = socket.send_to(&spoofed, peer).await;
+
+            // The genuine answer: correct ID, 203.0.113.99.
+            let mut real = buf[..question_end].to_vec();
+            real[2] = 0x81;
+            real[3] = 0x80;
+            real.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 203, 0, 113, 99]);
+            real[6] = 0;
+            real[7] = 1;
+            real[10] = 0;
+            real[11] = 0;
+            match hickory_proto::op::Message::from_vec(&real) {
+                Ok(m) => eprintln!(
+                    "RAW-UPSTREAM: sent real answer id={} rcode={:?} answers={} question={:?}",
+                    m.metadata.id,
+                    m.metadata.response_code,
+                    m.answers.len(),
+                    m.queries.first().map(|q| q.name().to_string())
+                ),
+                Err(e) => eprintln!("RAW-UPSTREAM: real response does not parse: {e}"),
+            }
+            let _ = socket.send_to(&real, peer).await;
+        }
+    });
+
+    let text = format!(
+        r#"
+upstreams = ["{addr}"]
+proxies = []
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#,
+        addr = addr
+    );
+    let daemon = Daemon::start(&text).await;
+
+    let response = daemon
+        .query_udp(&common::query("spoof.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        common::addresses(&response),
+        vec!["203.0.113.99".parse::<std::net::IpAddr>().expect("literal")],
+        "the genuine answer must win; the spoofed datagram must never be served"
+    );
+}

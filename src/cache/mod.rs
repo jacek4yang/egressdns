@@ -816,4 +816,71 @@ mod tests {
         assert!(!name_in_suffix("notexample.com.", "example.com."));
         assert!(name_in_suffix("anything.", "."));
     }
+    mod fingerprint_guards {
+        //! The mutation primitives the DNSSEC evidence plane calls are fingerprint-guarded:
+        //! a verdict may promote or evict only the variant whose fingerprint it carries.
+        //! The integration tests in `tests/resolution.rs` cover the same property through
+        //! the background task itself; these cover the primitives directly.
+
+        use super::*;
+
+        /// A verdict may mutate only the variant whose fingerprint it carries. These are
+        /// the primitives the evidence plane calls; the guard here is what stops a late
+        /// verdict about variant B from promoting or evicting a cached variant A.
+        #[test]
+        fn promote_only_binds_to_the_same_fingerprint() {
+            let cache = cache();
+            let now = Instant::now();
+            let k = key("guard.example.test", RecordType::A);
+            let served = entry(300, now, EntryKind::Positive, DnssecStatus::Indeterminate);
+            let served_fp = served.fingerprint;
+            cache.insert(k.clone(), Arc::clone(&served));
+
+            // A verdict about a different answer must not touch the cached entry.
+            assert!(
+                !cache.promote(&k, 0xDEAD_BEEF, DnssecStatus::Secure),
+                "a Secure verdict about another variant must not promote this one"
+            );
+            let still = match cache.get(&k, now + Duration::from_secs(1)) {
+                Lookup::Fresh { entry, .. } => entry.dnssec,
+                other => panic!("entry must still be fresh, got {other:?}"),
+            };
+            assert_eq!(still, DnssecStatus::Indeterminate);
+
+            // A verdict about *this* answer promotes it.
+            assert!(cache.promote(&k, served_fp, DnssecStatus::Secure));
+            let promoted = match cache.get(&k, now + Duration::from_secs(1)) {
+                Lookup::Fresh { entry, .. } => entry.dnssec,
+                other => panic!("entry must still be fresh, got {other:?}"),
+            };
+            assert_eq!(promoted, DnssecStatus::Secure);
+        }
+
+        #[test]
+        fn evict_only_binds_to_the_same_fingerprint() {
+            let cache = cache();
+            let now = Instant::now();
+            let k = key("evict.example.test", RecordType::A);
+            let served = entry(300, now, EntryKind::Positive, DnssecStatus::Indeterminate);
+            cache.insert(k.clone(), Arc::clone(&served));
+
+            // A Bogus verdict about another variant must not delete the cached answer.
+            assert!(!cache.evict_variant(&k, 0xDEAD_BEEF));
+            assert!(
+                matches!(
+                    cache.get(&k, now + Duration::from_secs(1)),
+                    Lookup::Fresh { .. } | Lookup::Stale { .. }
+                ),
+                "the cached answer must survive a verdict about a different variant"
+            );
+
+            // A Bogus verdict about this exact answer removes it.
+            let fp = served.fingerprint;
+            assert!(cache.evict_variant(&k, fp));
+            assert!(matches!(
+                cache.get(&k, now + Duration::from_secs(1)),
+                Lookup::Miss
+            ));
+        }
+    }
 }

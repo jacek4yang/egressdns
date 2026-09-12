@@ -542,6 +542,19 @@ impl Resolver {
                 _ => false,
             };
 
+            // The fingerprint of the answer the verdict is *about*. The validator
+            // re-sends the served query, but the upstream may answer differently than
+            // it did for the client: the verdict therefore describes whatever came back
+            // now, and may only mutate the cache when the cached entry *is* that
+            // answer. `answer_fingerprint` hashes name/type/class/rdata only, so it is
+            // stable across proof marks, TTL rewrites and transports.
+            let validated_fingerprint = match &result {
+                Ok(Some(Ok(response))) => {
+                    msgutil::answer_fingerprint(&response.clone().into_message())
+                }
+                _ => 0,
+            };
+
             let outcome = match result {
                 Err(_) => ValidationOutcome::Timeout,
                 Ok(Some(Ok(response))) => {
@@ -569,12 +582,37 @@ impl Resolver {
             )
             .increment(1);
 
-            // The fingerprint of whatever is cached *now*, so a verdict cannot act on an
-            // answer it did not examine.
-            let fingerprint = match cache.get(&key, Instant::now()) {
-                Lookup::Fresh { entry, .. } | Lookup::Stale { entry, .. } => entry.fingerprint,
-                _ => return,
-            };
+            // A verdict may modify only the variant it actually validated: the mutation
+            // primitives are fingerprint-guarded, and the fingerprint passed to them is
+            // the validated answer's, never "whatever the cache holds now". A verdict
+            // that arrives after the cache moved on to a different variant therefore
+            // mutates nothing — an early Bogus verdict cannot delete a newer, different
+            // answer, and an early Secure verdict cannot bless one.
+            if matches!(
+                outcome,
+                ValidationOutcome::Bogus
+                    | ValidationOutcome::Secure
+                    | ValidationOutcome::ProvenInsecure
+            ) && validated_fingerprint != 0
+            {
+                let current = match cache.get(&key, Instant::now()) {
+                    Lookup::Fresh { entry, .. } | Lookup::Stale { entry, .. } => {
+                        Some(entry.fingerprint)
+                    }
+                    _ => None,
+                };
+                if current.is_some() && current != Some(validated_fingerprint) {
+                    metrics::counter!(crate::metrics::names::DNSSEC_VARIANT_MISMATCH_TOTAL)
+                        .increment(1);
+                    tracing::debug!(
+                        event = "dnssec.variant_mismatch",
+                        name = %key.name,
+                        qtype = %key.qtype,
+                        "the verdict describes an answer other than the one currently \
+                         cached; nothing was changed"
+                    );
+                }
+            }
 
             match outcome {
                 ValidationOutcome::Bogus => {
@@ -596,7 +634,7 @@ impl Resolver {
                     // first is data removal; the second is punishing an upstream for
                     // not being a validator.
                     if carries_signatures {
-                        if cache.evict_variant(&key, fingerprint) {
+                        if cache.evict_variant(&key, validated_fingerprint) {
                             tracing::warn!(
                                 event = "dnssec.bogus",
                                 name = %key.name,
@@ -624,12 +662,12 @@ impl Resolver {
                     }
                 }
                 ValidationOutcome::Secure => {
-                    if cache.promote(&key, fingerprint, DnssecStatus::Secure) {
+                    if cache.promote(&key, validated_fingerprint, DnssecStatus::Secure) {
                         tracing::debug!(event = "dnssec.secure", name = %key.name);
                     }
                 }
                 ValidationOutcome::ProvenInsecure => {
-                    cache.promote(&key, fingerprint, DnssecStatus::Insecure);
+                    cache.promote(&key, validated_fingerprint, DnssecStatus::Insecure);
                 }
                 // Nothing was learned, so nothing changes.
                 ValidationOutcome::IncompleteProof
