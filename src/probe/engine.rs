@@ -391,21 +391,13 @@ impl ProbeEngine {
                 "kind" => intent.label(),
             )
             .increment(1);
-            // A cooldown refusal means "already observed recently": nothing was
-            // measured, so recording an observation would fabricate evidence — `samples`
-            // grows and `confidence` climbs on an address the engine never touched, and
-            // a first-time candidate refused by a prefix cooldown would enter the
-            // quality store as if it had been probed. Genuine policy refusals (special
-            // use, port, rate, budget) are recorded, because they are real, rare, and
-            // explain why an address has no evidence.
-            if !refusal.is_cooldown() {
-                self.record(
-                    ProbeKey::https(addr, port, &host),
-                    ObservationClass::PolicyBlocked,
-                    None,
-                    now,
-                );
-            }
+            // A policy block is never negative evidence about the address.
+            self.record(
+                ProbeKey::https(addr, port, &host),
+                ObservationClass::PolicyBlocked,
+                None,
+                now,
+            );
             return;
         }
 

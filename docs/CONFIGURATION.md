@@ -481,7 +481,7 @@ Active probe engine: budgets, safety and profiles. Everything here is background
 | `http_timeout` | duration | `5000ms` | Stage 3 timeout. |
 | `per_ip_cooldown` | duration | `300s` | Minimum interval between probes of the same address. |
 | `per_prefix_cooldown` | duration | `30s` | Minimum interval between probes inside the same prefix. |
-| `per_domain_cooldown` | duration | `600s` | Minimum interval between probes of the same (hostname, address) pair. Keyed per address so a multi-address name can learn about each of them; the per-IP and per-prefix cooldowns and the global rate limit still bound abuse. |
+| `per_domain_cooldown` | duration | `600s` | Minimum interval between domain-level validations of the same hostname. |
 | `max_candidates_per_rrset` | integer | `4` | Maximum number of addresses scheduled from a single observed RRset. |
 | `extra_ports` | list of integer | `vec![443]` | Ports probed in addition to those declared by HTTPS/SVCB or SRV records. |
 | `max_response_bytes` | integer | `16384` | Response body cap for HTTP probes. |
