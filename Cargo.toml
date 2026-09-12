@@ -25,6 +25,13 @@ path = "src/bin/egressdnsd.rs"
 name = "egressdnsctl"
 path = "src/bin/egressdnsctl.rs"
 
+# A measurement tool, not a product binary: it never ships in release archives and
+# exists to find the daemon's saturation point, which the Python load generator
+# cannot reach on Windows.
+[[bin]]
+name = "egressdns-loadgen"
+path = "src/bin/loadgen.rs"
+
 [dependencies]
 anyhow = "1"
 arc-swap = "1"
