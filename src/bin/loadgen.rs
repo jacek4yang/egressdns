@@ -265,14 +265,23 @@ async fn main() -> std::process::ExitCode {
     let mut worker_tasks = Vec::with_capacity(cli.workers);
 
     for _ in 0..cli.workers {
-        let socket = UdpSocket::bind(if target.is_ipv4() {
+        let socket = match UdpSocket::bind(if target.is_ipv4() {
             "0.0.0.0:0"
         } else {
             "[::]:0"
         })
         .await
-        .expect("bind worker socket");
-        socket.connect(target).await.expect("connect target");
+        {
+            Ok(socket) => socket,
+            Err(e) => {
+                eprintln!("could not bind worker socket: {e}");
+                return std::process::ExitCode::from(1);
+            }
+        };
+        if let Err(e) = socket.connect(target).await {
+            eprintln!("could not connect to {target}: {e}");
+            return std::process::ExitCode::from(1);
+        }
         let (tx, rx) = mpsc::channel::<Request>(1024);
         worker_channels.push(tx);
         let worker = Worker {
@@ -328,7 +337,10 @@ async fn main() -> std::process::ExitCode {
         }
         reservoir
     });
-    pacer.await.expect("pacer task");
+    if pacer.await.is_err() {
+        eprintln!("the pacer task did not complete cleanly");
+        return std::process::ExitCode::from(1);
+    }
     // One timeout window for stragglers, then close: dropping the last handles ends
     // the collector.
     tokio::time::sleep(Duration::from_millis(cli.timeout_ms + 500)).await;
@@ -336,7 +348,13 @@ async fn main() -> std::process::ExitCode {
     for task in worker_tasks {
         task.abort();
     }
-    let reservoir = collector.await.expect("collector task");
+    let reservoir = match collector.await {
+        Ok(reservoir) => reservoir,
+        Err(e) => {
+            eprintln!("the collector task did not complete cleanly: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
 
     let sent = counters.sent.load(Ordering::Relaxed);
     let timeouts = counters.timeouts.load(Ordering::Relaxed);
