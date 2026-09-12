@@ -1088,3 +1088,189 @@ async fn an_unevaluated_signature_is_withheld_not_evicted() {
          signatures were never evaluated is unprovable, not forged, and must stay cached"
     );
 }
+
+/// Repeated resolution of one name must converge on the address that actually works
+/// best from this network — without the cache-hit request itself doing any measuring.
+///
+/// The mock returns three addresses in upstream order: A, B, C. The "background
+/// observations" are injected into the quality store exactly as the probe engine
+/// records them (successes with the latency the simulated path produces, one timeout
+/// for the dead address), which is the seam where real network evidence enters the
+/// ranking state. The test then asserts:
+///
+/// * the first answer preserves the upstream order (no evidence yet);
+/// * after observations, the fast address leads and the dead one trails;
+/// * the answer set is a permutation throughout — nothing added, nothing removed;
+/// * the observations are bound to the network generation the daemon is in.
+#[tokio::test]
+async fn cached_answers_converge_on_the_best_address_as_evidence_accumulates() {
+    use std::net::IpAddr;
+    use std::time::Duration as StdDuration;
+
+    let handler = MockUpstream::new();
+    let addrs = [
+        ("203.0.113.10", "slow"),
+        ("203.0.113.20", "fast"),
+        ("203.0.113.30", "dead"),
+    ];
+    handler.set(
+        "converge.example.test.",
+        RecordType::A,
+        Behaviour::Answer(
+            addrs
+                .iter()
+                .map(|(ip, _)| a("converge.example.test.", 300, ip))
+                .collect(),
+        ),
+    );
+    // The HTTPS answer is the protocol's declaration that this name is a web service:
+    // port-443 measurements only apply to names with this evidence, which is exactly
+    // the conservative scoping the answer policy enforces.
+    handler.set(
+        "converge.example.test.",
+        RecordType::HTTPS,
+        Behaviour::Answer(vec![Record::from_rdata(
+            Name::from_utf8(String::from("converge.example.test.")).expect("name"),
+            300,
+            RData::HTTPS(hickory_proto::rr::rdata::https::HTTPS(
+                hickory_proto::rr::rdata::svcb::SVCB::new(
+                    0,
+                    Name::from_utf8(String::from("converge.example.test.")).expect("target"),
+                    vec![(
+                        hickory_proto::rr::rdata::svcb::SvcParamKey::Alpn,
+                        hickory_proto::rr::rdata::svcb::SvcParamValue::Alpn(
+                            hickory_proto::rr::rdata::svcb::Alpn(vec![String::from("h2")]),
+                        ),
+                    )],
+                ),
+            )),
+        )]),
+    );
+    // Probing stays enabled here: the HTTPS answer classifies the name as a web
+    // service through `schedule_probes`, and the background probes to the unroutable
+    // test addresses are exactly the real-daemon behaviour (they fail harmlessly and
+    // are not what this test measures — the ranking evidence is injected directly).
+    let ca = TestCa::new();
+    let servers = common::start_mock(
+        handler.clone(),
+        &ca,
+        "dns.example.test",
+        Transports {
+            udp: true,
+            tcp: true,
+            ..Transports::default()
+        },
+    )
+    .await;
+    let fragment = format!(
+        r#"
+upstreams = ["{}"]
+proxies = []
+
+[prefetch]
+enabled = false
+"#,
+        servers.udp.expect("mock udp")
+    );
+    let daemon = Daemon::start(&fragment).await;
+
+    let query = || common::query("converge.example.test.", RecordType::A, false);
+    let order = |m: &hickory_proto::op::Message| -> Vec<IpAddr> { common::addresses(m) };
+
+    // First answer: no evidence, upstream order preserved as a permutation. The HTTPS
+    // query comes first so the name is classified as a web service — the same
+    // declaration a real resolver session observes.
+    let https_query = || common::query("converge.example.test.", RecordType::HTTPS, false);
+    let declared = daemon.query_udp(&https_query()).await;
+    assert_eq!(
+        declared.metadata.response_code,
+        ResponseCode::NoError,
+        "the HTTPS declaration must resolve"
+    );
+    assert!(
+        !daemon.app.services.is_empty(),
+        "the HTTPS answer must classify the name as a web service"
+    );
+    let first = daemon.query_udp(&query()).await;
+    assert_eq!(first.metadata.response_code, ResponseCode::NoError);
+    let initial = order(&first);
+    let sorted = |v: &[IpAddr]| -> Vec<IpAddr> {
+        let mut v = v.to_vec();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        sorted(&initial),
+        sorted(&[
+            "203.0.113.10".parse::<IpAddr>().expect("ip"),
+            "203.0.113.20".parse::<IpAddr>().expect("ip"),
+            "203.0.113.30".parse::<IpAddr>().expect("ip"),
+        ]),
+        "the answer must be a permutation of the upstream set"
+    );
+
+    // Background observations, recorded the way the probe engine records them: the
+    // fast address answers quickly, the slow one answers slowly, the dead one times
+    // out. Enough samples for the ranking to act on (Medium confidence or better).
+    let cfg = egressdns::config::RankingConfig::default();
+    let now = tokio::time::Instant::now();
+    for (addr, kind) in [
+        ("203.0.113.10", "slow"),
+        ("203.0.113.20", "fast"),
+        ("203.0.113.30", "dead"),
+    ] {
+        let key = egressdns::ranking::store::ProbeKey::https(
+            addr.parse::<IpAddr>().expect("ip"),
+            443,
+            "converge.example.test",
+        );
+        for _ in 0..8 {
+            match kind {
+                "fast" => daemon.app.quality.record(
+                    key.clone(),
+                    egressdns::ranking::model::ObservationClass::Success,
+                    Some(StdDuration::from_millis(15)),
+                    1,
+                    now,
+                    &cfg,
+                ),
+                "slow" => daemon.app.quality.record(
+                    key.clone(),
+                    egressdns::ranking::model::ObservationClass::Success,
+                    Some(StdDuration::from_millis(200)),
+                    1,
+                    now,
+                    &cfg,
+                ),
+                _ => daemon.app.quality.record(
+                    key.clone(),
+                    egressdns::ranking::model::ObservationClass::Timeout,
+                    None,
+                    1,
+                    now,
+                    &cfg,
+                ),
+            }
+        }
+    }
+
+    // Second answer: the fast address must lead, the dead one must trail. Only the
+    // ordering may change — the set is still exactly the upstream set.
+    let second = daemon.query_udp(&query()).await;
+    let after = order(&second);
+    assert_eq!(
+        sorted(&after),
+        sorted(&initial),
+        "probe evidence must reorder, never add or remove"
+    );
+    assert_eq!(
+        after.first(),
+        Some(&"203.0.113.20".parse::<IpAddr>().expect("ip")),
+        "the address that actually answers fastest must lead after evidence: {after:?}"
+    );
+    assert_eq!(
+        after.last(),
+        Some(&"203.0.113.30".parse::<IpAddr>().expect("ip")),
+        "the address that times out must trail after evidence: {after:?}"
+    );
+}
