@@ -1045,14 +1045,19 @@ async fn a_bogus_verdict_of_a_different_variant_does_not_evict_the_cached_answer
     );
 }
 
-/// A Bogus verdict about the *served* variant still evicts it, once.
+/// A Bogus stamp on the answer's records does not evict when the signatures were
+/// never evaluated.
 ///
-/// The same complete answer — address set plus a bogus RRSIG — is returned to a DO=1
-/// client and to the validator. The verdict is about the cached variant: signatures
-/// present and failing, fingerprint identical, so the evidence plane removes it. The
-/// next client query re-fetches (a third upstream exchange) and is answered normally.
+/// hickory 0.26.3 distinguishes the two shapes at the record level: an RRSIG it
+/// evaluated and found failing carries `Proof::Bogus`; an RRSIG it never got to
+/// evaluate — because the chain of trust could not be completed, as with this mock —
+/// carries `Proof::Indeterminate`, which also holds the whole-answer status at
+/// `Indeterminate`. The evidence plane removes data only for the first shape; the
+/// second is the DNSSEC-incapable-upstream churn the plane exists to prevent. The same
+/// complete answer goes to a DO=1 client and to the validator, so the fingerprints
+/// match and only the signature-evaluation gate decides: the answer stays.
 #[tokio::test]
-async fn a_same_variant_bogus_verdict_evicts_the_cached_answer() {
+async fn an_unevaluated_signature_is_withheld_not_evicted() {
     let handler = MockUpstream::new();
     let mut signed = vec![a("evict.example.test.", 300, "203.0.113.11")];
     signed.push(bogus_rrsig_record("evict.example.test.", 300));
@@ -1078,8 +1083,8 @@ async fn a_same_variant_bogus_verdict_evicts_the_cached_answer() {
     assert_eq!(second.metadata.response_code, ResponseCode::NoError);
     assert_eq!(
         handler.count_for("evict.example.test.", RecordType::A),
-        3,
-        "expected client, validator and one re-fetch: the verdict about the served \
-         variant evicted it, so the second client query had to go upstream again"
+        2,
+        "expected one client query plus one validator query and no more: an answer whose \
+         signatures were never evaluated is unprovable, not forged, and must stay cached"
     );
 }

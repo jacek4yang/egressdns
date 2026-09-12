@@ -83,10 +83,11 @@ is wrong — do not adjust the test to match.
   holds now". A verdict about variant B cannot promote or evict a cached variant A; the
   evidence plane counts the mismatch (`dnssec_variant_mismatch_total`) and changes
   nothing.
-* A background Bogus verdict only removes data when the validated answer carried RRSIGs
-  (signatures present and failing). A chain walk that could not complete stamps Bogus on
-  answers carrying no signatures at all; that shape is recorded
-  (`dnssec.bogus_withheld`) and nothing is destroyed.
+* A background Bogus verdict only removes data when the validated answer carries an
+  RRSIG whose own proof is `Bogus` — a signature that was evaluated and failed. An
+  RRSIG hickory never evaluated carries `Indeterminate`, which holds the aggregate at
+  `Indeterminate`; that shape is recorded (`dnssec.bogus_withheld`) and nothing is
+  destroyed.
 * The upstream AD bit is not trusted unless explicitly configured per-server.
 * A truncated UDP answer is retried over a stream transport, never parsed opportunistically.
 * AAAA is never suppressed, filtered, or synthesised.

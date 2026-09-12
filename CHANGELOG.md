@@ -33,6 +33,14 @@ All notable changes to this project are documented here. The format follows
   (`egressdns_dnssec_variant_mismatch_total`) and changes nothing. Covered at both
   levels: fingerprint-guard unit tests on the cache primitives, and integration tests
   presenting different complete variants to the client and to the validator.
+* **The Bogus-eviction gate now reads the RRSIG's own proof, not its presence.**
+  hickory 0.26.3 stamps a signature it evaluated and found failing `Proof::Bogus`, and
+  one it never got to evaluate — because the chain of trust could not be completed —
+  `Proof::Indeterminate`, which also holds the whole-answer status at Indeterminate.
+  The evidence plane therefore removes data only when a signature was actually
+  evaluated and failed (the dnssec-failed.org shape behind a pass-through upstream);
+  an unverifiable chain with signatures attached stays cached and is counted as
+  unprovable. The discrimination is pinned by integration tests on both shapes.
 
 ## [4.0.0] — 2026-09-03
 

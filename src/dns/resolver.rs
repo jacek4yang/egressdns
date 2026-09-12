@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_net::xfer::DnsHandle;
+use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{DnsRequestOptions, Edns, Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, RData, RecordType};
 use rustls::RootCertStore;
@@ -531,14 +532,17 @@ impl Resolver {
             .await;
             drop(permit);
 
-            // Whether the validated answer carried signatures at all. This is the line
-            // between the two shapes a Bogus verdict can take, and it is decided before
-            // the outcome below consumes the message.
-            let carries_signatures = match &result {
+            // Whether the validated answer carries a signature that was *evaluated and
+            // failed* (`Proof::Bogus` on the RRSIG itself). Presence alone is not the
+            // signal: hickory stamps an RRSIG it never got to evaluate `Indeterminate`,
+            // which also drags the whole-answer status away from Bogus, so a Bogus
+            // aggregate with an unevaluated signature is still an unverifiable chain,
+            // not forged data. Decided before the outcome below consumes the message.
+            let carries_failed_signatures = match &result {
                 Ok(Some(Ok(response))) => response
                     .answers
                     .iter()
-                    .any(|r| r.record_type() == RecordType::RRSIG),
+                    .any(|r| r.record_type() == RecordType::RRSIG && r.proof == Proof::Bogus),
                 _ => false,
             };
 
@@ -559,18 +563,7 @@ impl Resolver {
                 Err(_) => ValidationOutcome::Timeout,
                 Ok(Some(Ok(response))) => {
                     let msg = response.into_message();
-                    let o = policy_dnssec::classify(&msg, &cfg.dnssec, false, observed);
-                    eprintln!(
-                        "BGV: ok verdict={o:?} answers={:?} sigs={}",
-                        msg.answers
-                            .iter()
-                            .map(|r| (r.record_type(), r.proof))
-                            .collect::<Vec<_>>(),
-                        msg.answers
-                            .iter()
-                            .any(|r| r.record_type() == RecordType::RRSIG)
-                    );
-                    o
+                    policy_dnssec::classify(&msg, &cfg.dnssec, false, observed)
                 }
                 // The validator failed before it could produce a verdict. That is an
                 // incomplete proof, never evidence of forgery: hickory reports a chain
@@ -582,10 +575,7 @@ impl Resolver {
                 // every unsigned name permanently re-fetched. Only a *completed*
                 // validation that reports `Proof::Bogus` records — the `Ok` branch above —
                 // may remove data.
-                Ok(Some(Err(e))) => {
-                    eprintln!("BGV: validator error: {e}");
-                    ValidationOutcome::IncompleteProof
-                }
+                Ok(Some(Err(_))) => ValidationOutcome::IncompleteProof,
                 Ok(None) => ValidationOutcome::TransportFailure,
             };
 
@@ -647,7 +637,7 @@ impl Resolver {
                     // non-validating upstream was always going to produce. Only the
                     // first is data removal; the second is punishing an upstream for
                     // not being a validator.
-                    if carries_signatures {
+                    if carries_failed_signatures {
                         if cache.evict_variant(&key, validated_fingerprint) {
                             tracing::warn!(
                                 event = "dnssec.bogus",
