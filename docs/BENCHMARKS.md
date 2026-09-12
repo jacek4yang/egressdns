@@ -265,6 +265,41 @@ official prefix API (17.2 µs), a 1000-line seed list (69.1 µs), a sampling rou
 (369.1 µs). Even the slowest is under half a millisecond; the reason they are off the
 request path is availability, not speed — see [`adr/0004`](adr/0004-foreground-background-split.md).
 
+## Native load generator (`egressdns-loadgen`) — 4.0.1
+
+The Python harness is generator-bound on Windows (~2–7 kqps); `src/bin/loadgen.rs` is a
+Tokio open-loop generator that speaks the same measurement language (useful-answer
+accounting, full rcode distribution, sorted percentiles to p99.9) and is not
+generator-bound below ~100 kqps on this host.
+
+### Measured saturation point (Windows host, cache-hit workload)
+
+Daemon on loopback against a local mock upstream, `--names 1` (every query a cache
+hit), 4 workers, 8-second runs:
+
+| Target qps | Completed qps | p50 | p95 | p99.9 | Timeouts |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 998 | 0.22 ms | 0.40 ms | 0.87 ms | 0 |
+| 10,000 | ~2,100 | 0.24 ms | 0.44 ms | 1.35 ms | 51,913 |
+| 25,000 | ~2,100 | 0.21 ms | 0.80 ms | 4.18 ms | 156,715 |
+| 100,000 | ~2,100 | 0.63 ms | 4.76 ms | 15.16 ms | 681,314 |
+
+**Finding**: the daemon's single-socket UDP ingress saturates at ≈2,100 responses/s on
+this host. Below saturation, cache hits are sub-millisecond at p99 (0.72 ms at 1,000
+qps). At saturation, completed queries stay fast (the receive loop is not slow — the
+excess datagrams are dropped by the OS, which the generator sees as timeouts), and the
+completion count pins to the ceiling rather than degrading gracefully.
+
+Control: pointing the same generator directly at the Python mock upstream completes
+5,668 qps — the generator is not the bottleneck, and the daemon is not forwarding at
+saturation (probe/prefetch disabled, all queries are cache hits).
+
+**Not yet done**: isolating whether the ceiling is the receive loop's per-datagram
+overhead, `SO_RCVBUF` sizing, or Windows loopback behaviour. Candidates for raising it:
+`server.udp.workers_per_socket` (SO_REUSEPORT is Unix-only, so Windows binds one
+socket per address today), receive batching (`recvmmsg`-style), and receive-buffer
+sizing. Until measured, 2,100 qps is the honest single-socket Windows figure.
+
 ## Performance regression policy
 
 A change touching the request path (`src/dns/`, `src/cache/`, `src/policy/`,
