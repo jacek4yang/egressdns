@@ -49,6 +49,20 @@ impl Refusal {
         }
     }
 
+    /// Whether the refusal means "already observed recently".
+    ///
+    /// Cooldown refusals carry no information about the address: nothing was measured
+    /// and nothing changed. Recording them as observations would fabricate evidence
+    /// (`samples` grows, `last_update` refreshes, `confidence` climbs) for an address
+    /// the probe engine never touched, so the engine skips the quality write for this
+    /// class entirely.
+    pub fn is_cooldown(self) -> bool {
+        matches!(
+            self,
+            Self::AddressCooldown | Self::PrefixCooldown | Self::DomainCooldown
+        )
+    }
+
     /// Convert to the public error type.
     pub fn into_error(self) -> ProbeError {
         ProbeError::PolicyBlocked {
@@ -96,7 +110,7 @@ impl GuardLimits {
 struct GuardState {
     ip_seen: HashMap<IpAddr, Instant>,
     prefix_seen: HashMap<(IpAddr, u8), Instant>,
-    domain_seen: HashMap<String, Instant>,
+    domain_seen: HashMap<(String, IpAddr), Instant>,
     window_start: Option<Instant>,
     window_count: u32,
     bandwidth_day: Option<Instant>,
@@ -221,7 +235,15 @@ impl ProbeGuard {
             }
         }
         if let Some(host) = hostname {
-            if let Some(last) = state.domain_seen.get(host) {
+            // Keyed by (hostname, address): a multi-address name must be able to learn
+            // about *each* of its addresses, which is the point of probing it. Keying by
+            // hostname alone let the first address's admission block every other
+            // address of the same name forever under demand-driven offers, leaving all
+            // but one address permanently neutral. Abuse is still bounded: each pair is
+            // gated by this cooldown, each address by the per-IP and per-prefix
+            // cooldowns, and the whole engine by the global rate limit and the daily
+            // bandwidth budget.
+            if let Some(last) = state.domain_seen.get(&(host.to_owned(), addr)) {
                 if now.saturating_duration_since(*last) < limits.per_domain {
                     return Err(Refusal::DomainCooldown);
                 }
@@ -232,7 +254,7 @@ impl ProbeGuard {
         state.ip_seen.insert(addr, now);
         state.prefix_seen.insert(prefix, now);
         if let Some(host) = hostname {
-            state.domain_seen.insert(host.to_string(), now);
+            state.domain_seen.insert((host.to_owned(), addr), now);
         }
         prune(&mut state, now, limits.per_ip.max(limits.per_domain));
         Ok(())
@@ -449,8 +471,24 @@ mod tests {
         assert!(g
             .admit(ip("104.16.0.2"), 443, false, Some("b.example"), later)
             .is_ok());
+        // The domain cooldown is keyed by (hostname, address): a multi-address name
+        // must be able to learn about each of its addresses, so a *different* address
+        // of the same domain is admitted, while the *same* pair is refused until the
+        // domain cooldown elapses.
+        let much_later = now + Duration::from_secs(91);
+        assert!(g
+            .admit(ip("104.16.1.9"), 443, false, Some("b.example"), much_later)
+            .is_ok());
+        // 100s: the per-IP cooldown on 104.16.0.2 (60s from its 31s admission) has
+        // elapsed, so the *domain* refusal is what this assert observes.
         assert_eq!(
-            g.admit(ip("104.16.1.9"), 443, false, Some("b.example"), later),
+            g.admit(
+                ip("104.16.0.2"),
+                443,
+                false,
+                Some("b.example"),
+                now + Duration::from_secs(100)
+            ),
             Err(Refusal::DomainCooldown)
         );
     }

@@ -228,6 +228,9 @@ pub struct Resolver {
     pub hotset: SharedHotSet,
     /// Probe work queue.
     pub probes: ProbeQueue,
+    /// Offer-side dedup for probe jobs: suppresses the duplicate offers a high-rate
+    /// name would otherwise push into the bounded queue on every cache hit.
+    probe_gate: crate::probe::gate::OfferGate,
     /// TLS roots, shared with the probe engine.
     pub roots: Arc<RootCertStore>,
     /// One DNSSEC validator per upstream group, built once so the validation cache is
@@ -323,6 +326,7 @@ impl Resolver {
             services,
             hotset,
             probes,
+            probe_gate: crate::probe::gate::OfferGate::new(),
             roots,
             validators,
             validation_slots,
@@ -1833,6 +1837,7 @@ impl Resolver {
         let snapshot = self.cloudflare.prefixes();
         let generation = self.network.generation();
         let limit = self.config.probe.max_candidates_per_rrset;
+        let cfg_probe = &self.config.probe;
         let hostname: Arc<str> = Arc::clone(&key.name);
         let mut scheduled = 0usize;
         for record in entry.message.answers.iter() {
@@ -1852,6 +1857,18 @@ impl Resolver {
                 .as_ref()
                 .map(|s| s.contains(addr))
                 .unwrap_or(false);
+            // The offer gate mirrors the safety guard's cooldowns at offer time. Every
+            // cache hit for a hot name would otherwise push a duplicate offer into the
+            // bounded queue, and the queue slots those duplicates consume are slots a
+            // first-time candidate needed. The window is the longest cooldown that
+            // would refuse the job, read live so a reload re-times the gate.
+            let gate_window = cfg_probe.per_domain_cooldown.max(cfg_probe.per_ip_cooldown);
+            if !self
+                .probe_gate
+                .allow(addr, 443, &hostname, gate_window, Instant::now())
+            {
+                continue;
+            }
             self.probes.offer(ProbeJob::Observed {
                 hostname: Arc::clone(&hostname),
                 addr,
