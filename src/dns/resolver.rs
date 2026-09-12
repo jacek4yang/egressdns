@@ -559,7 +559,18 @@ impl Resolver {
                 Err(_) => ValidationOutcome::Timeout,
                 Ok(Some(Ok(response))) => {
                     let msg = response.into_message();
-                    policy_dnssec::classify(&msg, &cfg.dnssec, false, observed)
+                    let o = policy_dnssec::classify(&msg, &cfg.dnssec, false, observed);
+                    eprintln!(
+                        "BGV: ok verdict={o:?} answers={:?} sigs={}",
+                        msg.answers
+                            .iter()
+                            .map(|r| (r.record_type(), r.proof))
+                            .collect::<Vec<_>>(),
+                        msg.answers
+                            .iter()
+                            .any(|r| r.record_type() == RecordType::RRSIG)
+                    );
+                    o
                 }
                 // The validator failed before it could produce a verdict. That is an
                 // incomplete proof, never evidence of forgery: hickory reports a chain
@@ -571,7 +582,10 @@ impl Resolver {
                 // every unsigned name permanently re-fetched. Only a *completed*
                 // validation that reports `Proof::Bogus` records — the `Ok` branch above —
                 // may remove data.
-                Ok(Some(Err(_))) => ValidationOutcome::IncompleteProof,
+                Ok(Some(Err(e))) => {
+                    eprintln!("BGV: validator error: {e}");
+                    ValidationOutcome::IncompleteProof
+                }
                 Ok(None) => ValidationOutcome::TransportFailure,
             };
 
