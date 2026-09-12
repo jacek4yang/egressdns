@@ -80,6 +80,9 @@ pub mod names {
         "egressdns_dnssec_indeterminate_served_total";
     /// Answers evicted after background validation proved them bogus.
     pub const DNSSEC_EVICTED_TOTAL: &str = "egressdns_dnssec_evicted_total";
+    /// Verdicts that referred to a variant other than the one currently cached, and so
+    /// mutated nothing.
+    pub const DNSSEC_VARIANT_MISMATCH_TOTAL: &str = "egressdns_dnssec_variant_mismatch_total";
     /// Background proof completions started.
     pub const DNSSEC_PROOF_COMPLETION_TOTAL: &str = "egressdns_dnssec_proof_completion_total";
     /// Probe workers currently executing a job.

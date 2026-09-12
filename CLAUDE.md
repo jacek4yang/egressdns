@@ -78,6 +78,16 @@ is wrong — do not adjust the test to match.
   evidence of failure.
 * A TCP 443 failure says nothing about whether an address is usable for DNS.
 * DNSSEC Bogus is SERVFAIL. There is no path that turns it into an answer.
+* A background DNSSEC verdict binds to the variant it actually validated, identified by
+  the fingerprint of the answer the validator returned — never to "whatever the cache
+  holds now". A verdict about variant B cannot promote or evict a cached variant A; the
+  evidence plane counts the mismatch (`dnssec_variant_mismatch_total`) and changes
+  nothing.
+* A background Bogus verdict only removes data when the validated answer carries an
+  RRSIG whose own proof is `Bogus` — a signature that was evaluated and failed. An
+  RRSIG hickory never evaluated carries `Indeterminate`, which holds the aggregate at
+  `Indeterminate`; that shape is recorded (`dnssec.bogus_withheld`) and nothing is
+  destroyed.
 * The upstream AD bit is not trusted unless explicitly configured per-server.
 * A truncated UDP answer is retried over a stream transport, never parsed opportunistically.
 * AAAA is never suppressed, filtered, or synthesised.

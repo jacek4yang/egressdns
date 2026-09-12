@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] — Unreleased
+
+### Security
+
+* **Hickory DNS upgraded 0.26.1 → 0.26.3** across `hickory-proto`, `hickory-net`,
+  `hickory-resolver` and `hickory-server`. The patch releases harden the upstream UDP
+  receive loop (message-ID checked on the raw bytes before any parsing, short datagrams
+  skipped, receive continues until a matching response arrives — a spoofed same-port
+  answer can no longer win the race by being parsed first), tighten NSEC3 record
+  validation, reject records whose class does not match the query, and make
+  parent-zone-insecurity proofs stricter: a chain walk that previously could accept an
+  unproven `Insecure` now requires an explicit `Proof::Insecure` record. EgressDNS's
+  compensations were re-audited against the new code: the `ProofFailure` observation
+  machinery and the RRSIG discriminator remain necessary (hickory still cannot
+  distinguish a cut-off chain walk from bad signatures). Pinned at the new source:
+  `tests/transports.rs::a_spoofed_upstream_response_with_the_wrong_id_is_ignored`.
+
+### Fixed
+
+* **A background DNSSEC verdict binds to the variant it actually validated.** The
+  evidence plane took the mutation target's fingerprint from *the cache at verdict
+  time*, so a verdict about whatever the validator happened to receive was applied to
+  whichever answer was cached at that moment — an early Secure verdict could bless a
+  different variant, and an early Bogus verdict could evict one. The validated answer's
+  own fingerprint (stable across proof marks, TTL rewrites and transports) is now the
+  mutation target; a verdict about a variant other than the cached one is counted
+  (`egressdns_dnssec_variant_mismatch_total`) and changes nothing. Covered at both
+  levels: fingerprint-guard unit tests on the cache primitives, and integration tests
+  presenting different complete variants to the client and to the validator.
+* **The Bogus-eviction gate now reads the RRSIG's own proof, not its presence.**
+  hickory 0.26.3 stamps a signature it evaluated and found failing `Proof::Bogus`, and
+  one it never got to evaluate — because the chain of trust could not be completed —
+  `Proof::Indeterminate`, which also holds the whole-answer status at Indeterminate.
+  The evidence plane therefore removes data only when a signature was actually
+  evaluated and failed (the dnssec-failed.org shape behind a pass-through upstream);
+  an unverifiable chain with signatures attached stays cached and is counted as
+  unprovable. The discrimination is pinned by integration tests on both shapes.
+
 ## [4.0.0] — 2026-09-03
 
 **Windows is a first-class platform, and the performance story is measured against real

@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_net::xfer::DnsHandle;
+use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{DnsRequestOptions, Edns, Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, RData, RecordType};
 use rustls::RootCertStore;
@@ -531,15 +532,31 @@ impl Resolver {
             .await;
             drop(permit);
 
-            // Whether the validated answer carried signatures at all. This is the line
-            // between the two shapes a Bogus verdict can take, and it is decided before
-            // the outcome below consumes the message.
-            let carries_signatures = match &result {
+            // Whether the validated answer carries a signature that was *evaluated and
+            // failed* (`Proof::Bogus` on the RRSIG itself). Presence alone is not the
+            // signal: hickory stamps an RRSIG it never got to evaluate `Indeterminate`,
+            // which also drags the whole-answer status away from Bogus, so a Bogus
+            // aggregate with an unevaluated signature is still an unverifiable chain,
+            // not forged data. Decided before the outcome below consumes the message.
+            let carries_failed_signatures = match &result {
                 Ok(Some(Ok(response))) => response
                     .answers
                     .iter()
-                    .any(|r| r.record_type() == RecordType::RRSIG),
+                    .any(|r| r.record_type() == RecordType::RRSIG && r.proof == Proof::Bogus),
                 _ => false,
+            };
+
+            // The fingerprint of the answer the verdict is *about*. The validator
+            // re-sends the served query, but the upstream may answer differently than
+            // it did for the client: the verdict therefore describes whatever came back
+            // now, and may only mutate the cache when the cached entry *is* that
+            // answer. `answer_fingerprint` hashes name/type/class/rdata only, so it is
+            // stable across proof marks, TTL rewrites and transports.
+            let validated_fingerprint = match &result {
+                Ok(Some(Ok(response))) => {
+                    msgutil::answer_fingerprint(&response.clone().into_message())
+                }
+                _ => 0,
             };
 
             let outcome = match result {
@@ -569,12 +586,37 @@ impl Resolver {
             )
             .increment(1);
 
-            // The fingerprint of whatever is cached *now*, so a verdict cannot act on an
-            // answer it did not examine.
-            let fingerprint = match cache.get(&key, Instant::now()) {
-                Lookup::Fresh { entry, .. } | Lookup::Stale { entry, .. } => entry.fingerprint,
-                _ => return,
-            };
+            // A verdict may modify only the variant it actually validated: the mutation
+            // primitives are fingerprint-guarded, and the fingerprint passed to them is
+            // the validated answer's, never "whatever the cache holds now". A verdict
+            // that arrives after the cache moved on to a different variant therefore
+            // mutates nothing — an early Bogus verdict cannot delete a newer, different
+            // answer, and an early Secure verdict cannot bless one.
+            if matches!(
+                outcome,
+                ValidationOutcome::Bogus
+                    | ValidationOutcome::Secure
+                    | ValidationOutcome::ProvenInsecure
+            ) && validated_fingerprint != 0
+            {
+                let current = match cache.get(&key, Instant::now()) {
+                    Lookup::Fresh { entry, .. } | Lookup::Stale { entry, .. } => {
+                        Some(entry.fingerprint)
+                    }
+                    _ => None,
+                };
+                if current.is_some() && current != Some(validated_fingerprint) {
+                    metrics::counter!(crate::metrics::names::DNSSEC_VARIANT_MISMATCH_TOTAL)
+                        .increment(1);
+                    tracing::debug!(
+                        event = "dnssec.variant_mismatch",
+                        name = %key.name,
+                        qtype = %key.qtype,
+                        "the verdict describes an answer other than the one currently \
+                         cached; nothing was changed"
+                    );
+                }
+            }
 
             match outcome {
                 ValidationOutcome::Bogus => {
@@ -595,8 +637,8 @@ impl Resolver {
                     // non-validating upstream was always going to produce. Only the
                     // first is data removal; the second is punishing an upstream for
                     // not being a validator.
-                    if carries_signatures {
-                        if cache.evict_variant(&key, fingerprint) {
+                    if carries_failed_signatures {
+                        if cache.evict_variant(&key, validated_fingerprint) {
                             tracing::warn!(
                                 event = "dnssec.bogus",
                                 name = %key.name,
@@ -624,12 +666,12 @@ impl Resolver {
                     }
                 }
                 ValidationOutcome::Secure => {
-                    if cache.promote(&key, fingerprint, DnssecStatus::Secure) {
+                    if cache.promote(&key, validated_fingerprint, DnssecStatus::Secure) {
                         tracing::debug!(event = "dnssec.secure", name = %key.name);
                     }
                 }
                 ValidationOutcome::ProvenInsecure => {
-                    cache.promote(&key, fingerprint, DnssecStatus::Insecure);
+                    cache.promote(&key, validated_fingerprint, DnssecStatus::Insecure);
                 }
                 // Nothing was learned, so nothing changes.
                 ValidationOutcome::IncompleteProof

@@ -905,3 +905,186 @@ enabled = false
         "expected one client query plus one validator query; a third exchange means          background validation evicted an answer it merely could not finish checking"
     );
 }
+
+/// Build an RRSIG record with an unverifiable signature by decoding wire format.
+///
+/// hickory exposes no public constructor for `RRSIG`, so the record is assembled as a
+/// complete DNS message and parsed back out. The signature is a run of zero bytes:
+/// hickory cannot verify it without a chain of trust, which is exactly the shape the
+/// evidence plane's Bogus gate has to handle — signatures present, verdict unprovable.
+fn bogus_rrsig_record(name: &str, ttl: u32) -> Record {
+    // RRSIG rdata (RFC 4034 section 3.1): covered type, algorithm, labels, original
+    // TTL, expiration, inception, key tag, signer name, signature.
+    let mut rdata: Vec<u8> = Vec::new();
+    rdata.extend_from_slice(&1u16.to_be_bytes()); // type covered: A
+    rdata.push(8); // algorithm: RSASHA256
+    rdata.push(3); // labels in the name
+    rdata.extend_from_slice(&ttl.to_be_bytes()); // original TTL
+    rdata.extend_from_slice(&[0xFF; 4]); // signature expiration
+    rdata.extend_from_slice(&[0; 4]); // signature inception
+    rdata.extend_from_slice(&0x3039u16.to_be_bytes()); // key tag
+    for label in name.trim_end_matches('.').split('.') {
+        rdata.push(label.len() as u8);
+        rdata.extend_from_slice(label.as_bytes());
+    }
+    rdata.push(0);
+    rdata.extend_from_slice(&[0u8; 64]); // the signature itself
+
+    // A full DNS message carrying one RRSIG answer, so hickory decodes the record.
+    let mut wire: Vec<u8> = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+    for label in name.trim_end_matches('.').split('.') {
+        wire.push(label.len() as u8);
+        wire.extend_from_slice(label.as_bytes());
+    }
+    wire.push(0);
+    wire.extend_from_slice(&[0, 1, 0, 1]); // QTYPE A, QCLASS IN
+    wire.extend_from_slice(&[0xC0, 0x0C]); // answer name: pointer to the question
+    wire.extend_from_slice(&46u16.to_be_bytes()); // RRSIG
+    wire.extend_from_slice(&1u16.to_be_bytes()); // IN
+    wire.extend_from_slice(&ttl.to_be_bytes());
+    wire.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    wire.extend_from_slice(&rdata);
+
+    let message = hickory_proto::op::Message::from_vec(&wire).expect("wire message parses");
+    let record = message.answers.first().expect("one answer").clone();
+    assert_eq!(
+        record.record_type(),
+        RecordType::RRSIG,
+        "helper built an RRSIG"
+    );
+    record
+}
+
+/// A daemon against one mock upstream, with DNSSEC in its default background mode.
+///
+/// The shared fragment helpers pin `[dnssec] mode = "off"`, which would disable the
+/// evidence plane these tests exercise; this one omits the section so the default
+/// applies.
+async fn background_mode_daemon(handler: MockUpstream) -> (Daemon, common::MockServers) {
+    let ca = TestCa::new();
+    let servers = common::start_mock(
+        handler,
+        &ca,
+        "dns.example.test",
+        Transports {
+            udp: true,
+            tcp: true,
+            ..Transports::default()
+        },
+    )
+    .await;
+    // The mock servers must outlive the daemon: dropping them stops the upstream.
+    let fragment = format!(
+        r#"
+upstreams = ["{}"]
+proxies = []
+
+[probe]
+enabled = false
+
+[prefetch]
+enabled = false
+"#,
+        servers.udp.expect("mock udp")
+    );
+    let daemon = Daemon::start(&fragment).await;
+    (daemon, servers)
+}
+
+/// A Bogus verdict about a *different* variant must not evict the cached answer.
+///
+/// The client is served the plain address set; by the time background validation
+/// re-asks, the upstream has added a bogus RRSIG to its answer. The verdict therefore
+/// describes the signed variant, while the cache still holds the plain one — and a
+/// verdict may modify only the variant it actually validated. The observable is the
+/// upstream query count: the cached answer survives (the validator's own re-query is
+/// the second exchange), and the second client query is a cache hit.
+#[tokio::test]
+async fn a_bogus_verdict_of_a_different_variant_does_not_evict_the_cached_answer() {
+    let handler = MockUpstream::new();
+    let plain = vec![a("bound.example.test.", 300, "203.0.113.10")];
+    let mut signed = plain.clone();
+    signed.push(bogus_rrsig_record("bound.example.test.", 300));
+    handler.set(
+        "bound.example.test.",
+        RecordType::A,
+        Behaviour::AnswerSequence(vec![plain, signed]),
+    );
+    // DS and DNSKEY lookups get empty NOERROR: no chain of trust is available.
+    handler.set_default(Behaviour::NoData { minimum: 60 });
+
+    let (daemon, _servers) = background_mode_daemon(handler.clone()).await;
+
+    let first = daemon
+        .query_udp(&common::query("bound.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(first.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        common::addresses(&first),
+        vec!["203.0.113.10".parse::<std::net::IpAddr>().expect("ip")]
+    );
+
+    // Validation runs against the signed variant and reports it Bogus (signatures
+    // present, chain absent).
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let second = daemon
+        .query_udp(&common::query("bound.example.test.", RecordType::A, false))
+        .await;
+    assert_eq!(second.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        common::addresses(&second),
+        vec!["203.0.113.10".parse::<std::net::IpAddr>().expect("ip")],
+        "the cached plain variant must survive a Bogus verdict about the signed variant"
+    );
+    assert_eq!(
+        handler.count_for("bound.example.test.", RecordType::A),
+        2,
+        "expected one client query plus one validator query; a third exchange means the \
+         verdict about the signed variant evicted the cached plain variant"
+    );
+}
+
+/// A Bogus stamp on the answer's records does not evict when the signatures were
+/// never evaluated.
+///
+/// hickory 0.26.3 distinguishes the two shapes at the record level: an RRSIG it
+/// evaluated and found failing carries `Proof::Bogus`; an RRSIG it never got to
+/// evaluate — because the chain of trust could not be completed, as with this mock —
+/// carries `Proof::Indeterminate`, which also holds the whole-answer status at
+/// `Indeterminate`. The evidence plane removes data only for the first shape; the
+/// second is the DNSSEC-incapable-upstream churn the plane exists to prevent. The same
+/// complete answer goes to a DO=1 client and to the validator, so the fingerprints
+/// match and only the signature-evaluation gate decides: the answer stays.
+#[tokio::test]
+async fn an_unevaluated_signature_is_withheld_not_evicted() {
+    let handler = MockUpstream::new();
+    let mut signed = vec![a("evict.example.test.", 300, "203.0.113.11")];
+    signed.push(bogus_rrsig_record("evict.example.test.", 300));
+    handler.set(
+        "evict.example.test.",
+        RecordType::A,
+        Behaviour::Answer(signed),
+    );
+    handler.set_default(Behaviour::NoData { minimum: 60 });
+
+    let (daemon, _servers) = background_mode_daemon(handler.clone()).await;
+
+    let first = daemon
+        .query_udp(&common::query("evict.example.test.", RecordType::A, true))
+        .await;
+    assert_eq!(first.metadata.response_code, ResponseCode::NoError);
+
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let second = daemon
+        .query_udp(&common::query("evict.example.test.", RecordType::A, true))
+        .await;
+    assert_eq!(second.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(
+        handler.count_for("evict.example.test.", RecordType::A),
+        2,
+        "expected one client query plus one validator query and no more: an answer whose \
+         signatures were never evaluated is unprovable, not forged, and must stay cached"
+    );
+}

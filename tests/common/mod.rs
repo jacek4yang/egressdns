@@ -46,6 +46,11 @@ pub enum Behaviour {
     Refused,
     /// Return an empty answer with the TC bit set, forcing a stream retry.
     Truncated,
+    /// Answer the k-th query for this name with the k-th list; the last list repeats.
+    ///
+    /// Lets a test present different complete answer variants to the client and to the
+    /// background validator, which is how verdict-to-variant binding is exercised.
+    AnswerSequence(Vec<Vec<Record>>),
     /// Model an answer too large for UDP: TC and no records over datagram transports,
     /// the full RRset over any stream transport.
     ///
@@ -175,19 +180,39 @@ impl RequestHandler for MockUpstream {
             tokio::time::sleep(d).await;
             behaviour = *inner;
         }
-        if let Behaviour::TruncatedOnUdp(records) = behaviour {
-            behaviour = if request.protocol() == hickory_server::net::xfer::Protocol::Udp {
-                Behaviour::Truncated
-            } else {
-                Behaviour::Answer(records)
-            };
-        }
+        // Resolve the remaining meta-behaviours into concrete answers. Borrow first,
+        // then clone: `TruncatedOnUdp` needs the request's protocol and
+        // `AnswerSequence` needs this query's ordinal, and neither may consume the
+        // enum while the other is still a possibility.
+        let behaviour = match &behaviour {
+            Behaviour::AnswerSequence(sequence) => {
+                let ordinal = *self
+                    .per_key
+                    .lock()
+                    .get(&(normalise(&name), qtype))
+                    .unwrap_or(&1);
+                let index = (ordinal.max(1) - 1).min(sequence.len() - 1);
+                Behaviour::Answer(sequence[index].clone())
+            }
+            Behaviour::TruncatedOnUdp(records) => {
+                if request.protocol() == hickory_server::net::xfer::Protocol::Udp {
+                    Behaviour::Truncated
+                } else {
+                    Behaviour::Answer(records.clone())
+                }
+            }
+            other => other.clone(),
+        };
 
         let builder = MessageResponseBuilder::from_message_request(request);
         let mut metadata = Metadata::response_from_request(&request.metadata);
         metadata.recursion_available = true;
 
         let result = match behaviour {
+            // Resolved into `Answer` above; a sequence that arrives here would mean a
+            // meta-behaviour escaped resolution, and an empty refusal is the honest
+            // outcome.
+            Behaviour::AnswerSequence(_) => return empty_info(&request.metadata),
             Behaviour::Drop => return empty_info(&request.metadata),
             Behaviour::ServFail => {
                 response_handle
