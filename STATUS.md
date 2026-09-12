@@ -1,6 +1,22 @@
 # Status
 
-**Version**: 4.0.0 · **Date**: 2026-09-03 · **Published**: <https://github.com/jacek4yang/egressdns>
+**Version**: 4.0.1 · **Date**: 2026-09-12
+
+## 4.0.1 summary
+
+A security/correctness patch. Every claim is marked with the command or test behind it.
+
+| Claim | Evidence |
+| --- | --- |
+| Hickory DNS 0.26.1 → 0.26.3 across all four crates | **Structural** — `Cargo.lock`; the vendored 0.26.3 sources were diffed against 0.26.1 for every surface EgressDNS touches (`dnssec/mod.rs`, `nsec3.rs`, `udp_client_stream.rs`, `error.rs`) and the changes are documented in the CHANGELOG |
+| The upstream UDP client ignores a spoofed response with a wrong message ID and still answers | **Tested** — `tests/transports.rs::a_spoofed_upstream_response_with_the_wrong_id_is_ignored`, a hand-rolled upstream that always offers the spoof first |
+| A background verdict binds to the variant it validated | **Tested** — cache-level `fingerprint_guards` unit tests plus `tests/resolution.rs::a_bogus_verdict_of_a_different_variant_does_not_evict_the_cached_answer` (validator receives a different variant; the cached one survives; upstream count 2, not 3) |
+| An unevaluated signature withholds rather than evicts | **Tested** — `tests/resolution.rs::an_unevaluated_signature_is_withheld_not_evicted`; observed live in CI debug output: hickory 0.26.3 stamps an unevaluated RRSIG `Indeterminate`, holding the aggregate at Indeterminate |
+| The full suite passes on the upgraded dependency graph | **Measured** — Windows host: 482 lib + 23 resolution + 11 transports green, clippy `-D warnings` clean; CI matrix green on Ubuntu and Windows |
+| Licences/bans hold with the new graph | **Measured** — `cargo deny check licenses bans sources` clean; advisories run in CI |
+| 24-hour soak on 0.26.3 | **Unverified.** |
+
+## 4.0.0 summary · **Published**: <https://github.com/jacek4yang/egressdns>
 
 ## 4.0.0 summary
 
